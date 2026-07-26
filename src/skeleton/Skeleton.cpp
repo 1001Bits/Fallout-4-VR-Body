@@ -11,6 +11,7 @@
 #include "f4vr/BSFlattenedBoneTree.h"
 #include "f4vr/F4VRSkelly.h"
 #include "f4vr/F4VRUtils.h"
+#include "ik/ArmIK.h"
 #include "vrcf/VRControllersManager.h"
 
 using namespace common;
@@ -25,19 +26,29 @@ namespace
     constexpr float kDirectionChangeDelaySeconds = 2.0f / 90.0f;
     constexpr float kStepRetargetDeceleration = -20.0f * 90.0f;
 
-    bool isFinite(const RE::NiPoint3& point)
+    frik::ik::Vec3 toIKVector(const RE::NiPoint3& value)
     {
-        return std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z) &&
-            std::abs(point.x) < kMaximumTrackedPosition &&
-            std::abs(point.y) < kMaximumTrackedPosition &&
-            std::abs(point.z) < kMaximumTrackedPosition;
+        return { value.x, value.y, value.z };
     }
 
-    bool isFinite(const RE::NiMatrix3& matrix)
+    RE::NiPoint3 toNiPoint(const frik::ik::Vec3& value)
     {
-        for (std::uint32_t row = 0; row < 3; ++row) {
-            for (std::uint32_t column = 0; column < 3; ++column) {
-                if (!std::isfinite(matrix.entry[row][column])) {
+        return { value.x, value.y, value.z };
+    }
+
+    bool isFinite(const RE::NiPoint3& value)
+    {
+        return frik::ik::isFinite(toIKVector(value)) &&
+            std::abs(value.x) < kMaximumTrackedPosition &&
+            std::abs(value.y) < kMaximumTrackedPosition &&
+            std::abs(value.z) < kMaximumTrackedPosition;
+    }
+
+    bool isFinite(const RE::NiMatrix3& value)
+    {
+        for (const auto& row : value.entry) {
+            for (const float component : row) {
+                if (!frik::ik::isFinite(component)) {
                     return false;
                 }
             }
@@ -83,6 +94,20 @@ namespace
 
         output = input / length;
         return isFinite(output);
+    }
+
+    RE::NiPoint3 safeNormalize(
+        const RE::NiPoint3& value,
+        const RE::NiPoint3& fallback = { 1.0f, 0.0f, 0.0f })
+    {
+        RE::NiPoint3 normalized;
+        if (tryNormalize(value, normalized)) {
+            return normalized;
+        }
+        if (tryNormalize(fallback, normalized)) {
+            return normalized;
+        }
+        return RE::NiPoint3(1.0f, 0.0f, 0.0f);
     }
 
     bool tryNormalizePlanar(const RE::NiPoint3& input, RE::NiPoint3& output)
@@ -472,6 +497,8 @@ namespace frik
     void Skeleton::resetMotionState()
     {
         _lastPosition = _curentPosition;
+        _lastNeckYaw = 0.0f;
+        _armIKContinuity = {};
         resetWalkingState();
 
         // The damped objects are weapon offset nodes, not the first-person
@@ -536,8 +563,6 @@ namespace frik
             _playerNodes->playerworldnode &&
             _playerNodes->UprightHmdNode &&
             _playerNodes->primaryWandNode && _playerNodes->SecondaryWandNode &&
-            _playerNodes->primaryWeaponOffsetNOde && _playerNodes->SecondaryMeleeWeaponOffsetNode2 &&
-            _playerNodes->WeaponLeftNode &&
             _head && _spine && _chest && _com && _neck && _spine1 &&
             _rightHand && _leftHand && armsAvailable;
     }
@@ -1419,7 +1444,17 @@ namespace frik
         // everything to go to the PrimaryWeaponNode.  I have hardcoded a rotation below based off one of the guns that
         // matches my real life hand pose with an index controller very well.   I use this as the baseline for everything
 
+        auto& continuity = _armIKContinuity[isLeft ? 0 : 1];
         if (getFirstPersonSkeleton() == nullptr) {
+            continuity = {};
+            return;
+        }
+
+        const auto arm = isLeft ? _leftArm : _rightArm;
+        if (!arm.shoulder || !arm.upper || !arm.forearm1 || !arm.hand ||
+            (!_inPowerArmor && (!arm.forearm2 || !arm.forearm3))) {
+            logger::sample("Cannot solve {} arm: required skeleton nodes are missing", isLeft ? "left" : "right");
+            continuity = {};
             return;
         }
 
@@ -1432,6 +1467,11 @@ namespace frik
 
         RE::NiNode* weaponNode = handleOffhand ? leftWeapon : rightWeapon;
         RE::NiNode* offsetNode = handleOffhand ? _playerNodes->SecondaryMeleeWeaponOffsetNode2 : _playerNodes->primaryWeaponOffsetNOde;
+        if (!weaponNode || !offsetNode || (handleOffhand && !_playerNodes->primaryWeaponOffsetNOde)) {
+            logger::sample("Cannot solve {} arm: tracked weapon nodes are missing", isLeft ? "left" : "right");
+            continuity = {};
+            return;
+        }
 
         if (handleOffhand) {
             _playerNodes->SecondaryMeleeWeaponOffsetNode2->local = _playerNodes->primaryWeaponOffsetNOde->local;
@@ -1463,171 +1503,97 @@ namespace frik
         RE::NiPoint3 handPos = isLeft ? _leftHand->world.translate : _rightHand->world.translate;
         RE::NiMatrix3 handRot = isLeft ? _leftHand->world.rotate : _rightHand->world.rotate;
 
-        const auto arm = isLeft ? _leftArm : _rightArm;
-
         // Detect if the 1st person hand position is invalid. This can happen when a controller loses tracking.
         // If it is, do not handle IK and let Fallout use its normal animations for that arm instead.
-        if (isnan(handPos.x) || isnan(handPos.y) || isnan(handPos.z) ||
-            isinf(handPos.x) || isinf(handPos.y) || isinf(handPos.z) ||
+        if (!isFinite(handPos) || !isFinite(handRot) ||
             MatrixUtils::vec3Len(arm.upper->world.translate - handPos) > 200.0) {
+            continuity = {};
             return;
         }
 
-        float adjustedArmLength = g_config.armLength / 36.74f;
+        // Calibrated dimensions are solver-only.  Scaling these individual
+        // bone offsets does not touch the actor root or weapon hierarchy.
+        constexpr float referenceArmLength = 36.74f;
+        float calibratedArmLength = isLeft ? g_config.leftArmLength : g_config.rightArmLength;
+        if (!std::isfinite(calibratedArmLength) || calibratedArmLength <= 1.0f) {
+            calibratedArmLength =
+                std::isfinite(g_config.armLength) && g_config.armLength > 1.0f
+                ? g_config.armLength
+                : referenceArmLength;
+        }
+        const float adjustedArmLength = calibratedArmLength / referenceArmLength;
 
-        // Shoulder IK is done in a very simple way
+        const float shoulderWidthScale = std::clamp(
+            g_config.shoulderWidth / DEFAULT_SHOULDER_WIDTH,
+            0.65f,
+            1.50f);
+        if (!std::isfinite(shoulderWidthScale) || !isFinite(arm.upper->local.translate)) {
+            continuity = {};
+            return;
+        }
+        arm.upper->local.translate *= shoulderWidthScale;
+        updateDown(arm.shoulder, true);
 
-        RE::NiPoint3 shoulderToHand = handPos - arm.upper->world.translate;
-        float armLength = g_config.armLength;
-        float adjustAmount = (std::clamp)(MatrixUtils::vec3Len(shoulderToHand) - armLength * 0.5f, 0.0f, armLength * 0.85f) / (armLength * 0.85f);
-        RE::NiPoint3 shoulderOffset = MatrixUtils::vec3Norm(shoulderToHand) * (adjustAmount * armLength * 0.08f);
+        const float originalUpperLen = MatrixUtils::vec3Len(arm.forearm1->local.translate);
+        const float originalForearmLen = _inPowerArmor ?
+            MatrixUtils::vec3Len(arm.hand->local.translate) :
+            MatrixUtils::vec3Len(arm.hand->local.translate) + MatrixUtils::vec3Len(arm.forearm2->local.translate) +
+                MatrixUtils::vec3Len(arm.forearm3->local.translate);
+        const float restArmLength = (originalUpperLen + originalForearmLen) * adjustedArmLength;
+        if (!std::isfinite(restArmLength) || restArmLength <= 0.01f) {
+            continuity = {};
+            return;
+        }
+
+        // Parger distinct-shoulder estimation: use a dimensionless reach ratio,
+        // preserving the current FRIK collarbone mechanism and skeleton scale.
+        const RE::NiPoint3 shoulderToHand = handPos - arm.upper->world.translate;
+        const float reachRatio = MatrixUtils::vec3Len(shoulderToHand) / restArmLength;
+        const float shoulderReach = ik::smoothStep(0.5f, 1.05f, reachRatio);
+        const RE::NiPoint3 shoulderOffset = safeNormalize(shoulderToHand) * (shoulderReach * restArmLength * 0.08f);
 
         RE::NiPoint3 clavicalToNewShoulder = arm.upper->world.translate + shoulderOffset - arm.shoulder->world.translate;
 
+        if (!std::isfinite(arm.shoulder->world.scale) || std::abs(arm.shoulder->world.scale) <= 0.0001f) {
+            continuity = {};
+            return;
+        }
         RE::NiPoint3 sLocalDir = arm.shoulder->world.rotate * (clavicalToNewShoulder / arm.shoulder->world.scale);
 
-        RE::NiMatrix3 result = MatrixUtils::getMatrixFromRotateVectorVec(sLocalDir, RE::NiPoint3(1, 0, 0)) * arm.shoulder->local.rotate;
-        arm.shoulder->local.rotate = result;
+        if (ik::length(toIKVector(sLocalDir)) > 0.0001f) {
+            arm.shoulder->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(sLocalDir, RE::NiPoint3(1, 0, 0)) * arm.shoulder->local.rotate;
+        }
 
         updateDown(arm.shoulder, true);
 
-        // The bend of the arm depends on its distance to the body.  Its distance as well as the lengths of
-        // the upper arm and forearm define the sides of a triangle:
-        //                 ^
-        //                /|\         Let a,b be the arm lengths, c be the distance from hand-to-shoulder
-        //               /^| \        Let A be the total angle at which the wrist must bend
-        //              / ||  \       Let x be the width of the right triangle
-        //            a/  y|   \  b   Let y be the height of the right triangle
-        //            /   ||    \
-        //           /    v|<-x->\
-        // Shoulder /______|_____A\ Hand
-        //                c
-        // Law of cosines: Wrist angle A = acos( (b^2 + c^2 - a^2) / (2*b*c) )
-        // The wrist angle is used to calculate x and y, which are used to position the elbow
-
         float negLeft = isLeft ? -1.0f : 1.0f;
-
-        float originalUpperLen = MatrixUtils::vec3Len(arm.forearm1->local.translate);
-        float originalForearmLen;
-
-        if (_inPowerArmor) {
-            originalForearmLen = MatrixUtils::vec3Len(arm.hand->local.translate);
-        } else {
-            originalForearmLen = MatrixUtils::vec3Len(arm.hand->local.translate) + MatrixUtils::vec3Len(arm.forearm2->local.translate) + MatrixUtils::vec3Len(
-                arm.forearm3->local.translate);
-        }
-        float upperLen = originalUpperLen * adjustedArmLength;
-        float forearmLen = originalForearmLen * adjustedArmLength;
-
-        RE::NiPoint3 Uwp = arm.upper->world.translate;
-        RE::NiPoint3 handToShoulder = Uwp - handPos;
-        float hsLen = (std::max)(MatrixUtils::vec3Len(handToShoulder), 0.1f);
-
-        if (hsLen > (upperLen + forearmLen) * 2.25f) {
+        const RE::NiPoint3 forwardDir = safeNormalize(_forwardDir, RE::NiPoint3(0, 1, 0));
+        const RE::NiPoint3 sidewaysDir = safeNormalize(_sidewaysRDir * negLeft, RE::NiPoint3(negLeft, 0, 0));
+        const RE::NiPoint3 handBack = safeNormalize(handRot.Transpose() * RE::NiPoint3(-1, 0, 0), forwardDir * -1.0f);
+        RE::NiPoint3 handSide = handRot.Transpose() * (RE::NiPoint3(0, -1, 0));
+        RE::NiPoint3 handInSide = handSide * negLeft;
+        const RE::NiPoint3 Uwp = arm.upper->world.translate;
+        const ik::ArmSolveInput solveInput{
+            .shoulder = toIKVector(Uwp),
+            .hand = toIKVector(handPos),
+            .bodyForward = toIKVector(forwardDir),
+            .bodyOutward = toIKVector(sidewaysDir),
+            .bodyUp = { 0.0f, 0.0f, 1.0f },
+            .handBack = toIKVector(handBack),
+            .handSide = toIKVector(safeNormalize(handInSide, sidewaysDir)),
+            .upperLength = originalUpperLen * adjustedArmLength,
+            .lowerLength = originalForearmLen * adjustedArmLength,
+            .deltaTime = _frameTime
+        };
+        const auto solve = ik::solveArm(solveInput, continuity);
+        if (!solve.valid) {
+            continuity = {};
             return;
         }
 
-        // Stretch the upper arm and forearm proportionally when the hand distance exceeds the arm length
-        if (hsLen > upperLen + forearmLen) {
-            float diff = hsLen - upperLen - forearmLen;
-            float ratio = forearmLen / (forearmLen + upperLen);
-            forearmLen += ratio * diff + 0.1f;
-            upperLen += (1.0f - ratio) * diff + 0.1f;
-        }
-
-        RE::NiPoint3 forwardDir = MatrixUtils::vec3Norm(_forwardDir);
-        RE::NiPoint3 sidewaysDir = MatrixUtils::vec3Norm(_sidewaysRDir * negLeft);
-
-        // The primary twist angle comes from the direction the wrist is pointing into the forearm
-        RE::NiPoint3 handBack = handRot.Transpose() * (RE::NiPoint3(-1, 0, 0));
-        float twistAngle = asinf((std::clamp)(handBack.z, -0.999f, 0.999f));
-
-        // The second twist angle comes from a side vector pointing "outward" from the side of the wrist
-        RE::NiPoint3 handSide = handRot.Transpose() * (RE::NiPoint3(0, -1, 0));
-        RE::NiPoint3 handInSide = handSide * negLeft;
-        float twistAngle2 = -1 * asinf((std::clamp)(handSide.z, -0.599f, 0.999f));
-
-        // Blend the two twist angles together, using the primary angle more when the wrist is pointing downward
-        //float interpTwist = (std::clamp)((handBack.z + 0.866f) * 1.155f, 0.25f, 0.8f); // 0 to 1 as hand points 60 degrees down to horizontal
-        float interpTwist = (std::clamp)((handBack.z + 0.866f) * 1.155f, 0.45f, 0.8f); // 0 to 1 as hand points 60 degrees down to horizontal
-        //		logger::info("%2f %2f %2f", rads_to_degrees(twistAngle), rads_to_degrees(twistAngle2), interpTwist);
-        twistAngle = twistAngle + interpTwist * (twistAngle2 - twistAngle);
-        // Wonkiness is bad.  Interpolate twist angle towards zero to correct it when the angles are pointed a certain way.
-        /*	float fixWonkiness1 = (std::clamp)(vec3_dot(handSide, vec3_norm(-sidewaysDir - forwardDir * 0.25f + RE::NiPoint3(0, 0, -0.25f))), 0.0f, 1.0f);
-            float fixWonkiness2 = 1.0f - (std::clamp)(vec3_dot(handBack, vec3_norm(forwardDir + sidewaysDir)), 0.0f, 1.0f);
-            twistAngle = twistAngle + fixWonkiness1 * fixWonkiness2 * (-PI / 2.0f - twistAngle);*/
-
-        //		logger::info("final angle %2f", rads_to_degrees(twistAngle));
-
-        // Smooth out sudden changes in the twist angle over time to reduce elbow shake
-        static std::array<float, 2> prevAngle = { 0, 0 };
-        twistAngle = prevAngle[isLeft ? 0 : 1] + (twistAngle - prevAngle[isLeft ? 0 : 1]) * 0.25f;
-        prevAngle[isLeft ? 0 : 1] = twistAngle;
-
-        // Calculate the hand's distance behind the body - It will increase the minimum elbow rotation angle
-        float size = 1.0;
-        float behindD = -(forwardDir.x * arm.shoulder->world.translate.x + forwardDir.y * arm.shoulder->world.translate.y) - 10.0f;
-        float handBehindDist = -(handPos.x * forwardDir.x + handPos.y * forwardDir.y + behindD);
-        float behindAmount = (std::clamp)(handBehindDist / (40.0f * size), 0.0f, 1.0f);
-
-        // Holding hands in front of chest increases the minimum elbow rotation angle (elbows lift) and decreases the maximum angle
-        RE::NiPoint3 planeDir = MatrixUtils::rotateXY(forwardDir, negLeft * MatrixUtils::degreesToRads(135));
-        float planeD = -(planeDir.x * arm.shoulder->world.translate.x + planeDir.y * arm.shoulder->world.translate.y) + 16.0f * size;
-        float armCrossAmount = (std::clamp)((handPos.x * planeDir.x + handPos.y * planeDir.y + planeD) / (20.0f * size), 0.0f, 1.0f);
-
-        // The arm lift limits how much the crossing amount can influence minimum elbow rotation
-        // The maximum rotation is also decreased as hands lift higher (elbows point further downward)
-        float armLiftLimitZ = _chest->world.translate.z * size;
-        float armLiftThreshold = 60.0f * size;
-        float armLiftLimit = (std::clamp)((armLiftLimitZ + armLiftThreshold - handPos.z) / armLiftThreshold, 0.0f, 1.0f); // 1 at bottom, 0 at top
-        float upLimit = (std::clamp)((1.0f - armLiftLimit) * 1.4f, 0.0f, 1.0f); // 0 at bottom, 1 at a much lower top
-
-        // Determine overall amount the elbows minimum rotation will be limited
-        float adjustMinAmount = (std::max)(behindAmount, (std::min)(armCrossAmount, armLiftLimit));
-
-        // Get the minimum and maximum angles at which the elbow is allowed to twist
-        float twistMinAngle = MatrixUtils::degreesToRads(-85.0) + MatrixUtils::degreesToRads(50) * adjustMinAmount;
-        float twistMaxAngle = MatrixUtils::degreesToRads(55.0) - (std::max)(MatrixUtils::degreesToRads(90) * armCrossAmount, MatrixUtils::degreesToRads(70) * upLimit);
-
-        // Twist angle ranges from -PI/2 to +PI/2; map that range to go from the minimum to the maximum instead
-        float twistLimitAngle = twistMinAngle + (twistAngle + std::numbers::pi_v<float> / 2.0f) / std::numbers::pi_v<float> * (twistMaxAngle - twistMinAngle);
-
-        //logger::info("{} {} {} {}", rads_to_degrees(twistAngle), rads_to_degrees(twistAngle2), rads_to_degrees(twistAngle), rads_to_degrees(twistLimitAngle));
-        // The bendDownDir vector points in the direction the player faces, and bends up/down with the final elbow angle
-        RE::NiMatrix3 rot = MatrixUtils::getRotationAxisAngle(sidewaysDir * negLeft, twistLimitAngle);
-        RE::NiPoint3 bendDownDir = rot.Transpose() * (forwardDir);
-
-        // Get the "X" direction vectors pointing to the shoulder
-        RE::NiPoint3 xDir = MatrixUtils::vec3Norm(handToShoulder);
-
-        // Get the final "Y" vector, perpendicular to "X", and pointing in elbow direction (as in the diagram above)
-        float sideD = -(sidewaysDir.x * arm.shoulder->world.translate.x + sidewaysDir.y * arm.shoulder->world.translate.y) - 1.0f * 8.0f;
-        float acrossAmount = -(handPos.x * sidewaysDir.x + handPos.y * sidewaysDir.y + sideD) / (16.0f * 1.0f);
-        float handSideTwistOutward = MatrixUtils::vec3Dot(handSide, MatrixUtils::vec3Norm(sidewaysDir + forwardDir * 0.5f));
-        float armTwist = (std::clamp)(handSideTwistOutward - (std::max)(0.0f, acrossAmount + 0.25f), 0.0f, 1.0f);
-
-        if (acrossAmount < 0) {
-            acrossAmount *= 0.2f;
-        }
-
-        float handBehindHead = (std::clamp)((handBehindDist + 0.0f * size) / (15.0f * size), 0.0f, 1.0f) * (std::clamp)(upLimit * 1.2f, 0.0f, 1.0f);
-        float elbowsTwistForward = (std::max)(acrossAmount * MatrixUtils::degreesToRads(90), handBehindHead * MatrixUtils::degreesToRads(120));
-        RE::NiPoint3 elbowDir = MatrixUtils::rotateXY(bendDownDir, -negLeft * (MatrixUtils::degreesToRads(150) - armTwist * MatrixUtils::degreesToRads(25) - elbowsTwistForward));
-        RE::NiPoint3 yDir = elbowDir - xDir * MatrixUtils::vec3Dot(elbowDir, xDir);
-        yDir = MatrixUtils::vec3Norm(yDir);
-
-        // Get the angle wrist must bend to reach elbow position
-        // In cases where this is impossible (hand too close to shoulder), then set forearmLen = upperLen so there is always a solution
-        float wristAngle = acosf((forearmLen * forearmLen + hsLen * hsLen - upperLen * upperLen) / (2 * forearmLen * hsLen));
-        if (isnan(wristAngle) || isinf(wristAngle)) {
-            forearmLen = upperLen = (originalUpperLen + originalForearmLen) / 2.0f * adjustedArmLength;
-            wristAngle = acosf((forearmLen * forearmLen + hsLen * hsLen - upperLen * upperLen) / (2 * forearmLen * hsLen));
-        }
-
-        // Get the desired world coordinate of the elbow
-        float xDist = cosf(wristAngle) * forearmLen;
-        float yDist = sinf(wristAngle) * forearmLen;
-        RE::NiPoint3 elbowWorld = handPos + xDir * xDist + yDir * yDist;
+        const float forearmLen = solve.lowerLength;
+        const RE::NiPoint3 elbowWorld = toNiPoint(solve.elbow);
+        const RE::NiPoint3 solvedHandPos = Uwp + safeNormalize(handPos - Uwp) * solve.solvedReach;
 
         // This code below rotates and positions the upper arm, forearm, and hand bones
         // Notation: C=Clavicle, U=Upper arm, F=Forearm, H=hand   w=world, l=local   p=position, r=rotation, s=scale
@@ -1639,7 +1605,10 @@ namespace frik
         // Calculate Ulr:  baseUwr * rotTowardElbow = Cwr * Ulr   ===>   Ulr = Cwr' * baseUwr * rotTowardElbow
         RE::NiMatrix3 Uwr = arm.upper->world.rotate;
         RE::NiPoint3 pos = elbowWorld - Uwp;
-        RE::NiPoint3 uLocalDir = Uwr * (MatrixUtils::vec3Norm(pos) / arm.upper->world.scale);
+        if (!std::isfinite(arm.upper->world.scale) || std::abs(arm.upper->world.scale) <= 0.0001f) {
+            return;
+        }
+        RE::NiPoint3 uLocalDir = Uwr * (safeNormalize(pos) / arm.upper->world.scale);
 
         arm.upper->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(uLocalDir, arm.forearm1->local.translate) * arm.upper->local.rotate;
 
@@ -1647,13 +1616,16 @@ namespace frik
 
         // Find the angle of the forearm twisted around the upper arm and twist the upper arm to align it
         //    Uwr * twist = Cwr * Ulr   ===>   Ulr = Cwr' * Uwr * twist
-        pos = handPos - elbowWorld;
-        RE::NiPoint3 uLocalTwist = Uwr * (MatrixUtils::vec3Norm(pos));
+        pos = solvedHandPos - elbowWorld;
+        RE::NiPoint3 uLocalTwist = Uwr * safeNormalize(pos);
         uLocalTwist.x = 0;
         RE::NiPoint3 upperSide = arm.upper->world.rotate.Transpose() * (RE::NiPoint3(0, 1, 0));
         RE::NiPoint3 uloc = arm.shoulder->world.rotate * (upperSide);
         uloc.x = 0;
-        float upperAngle = acosf(MatrixUtils::vec3Dot(MatrixUtils::vec3Norm(uLocalTwist), MatrixUtils::vec3Norm(uloc))) * (uLocalTwist.z > 0 ? 1.f : -1.f);
+        float upperAngle = 0.0f;
+        if (ik::length(toIKVector(uLocalTwist)) > 0.0001f && ik::length(toIKVector(uloc)) > 0.0001f) {
+            upperAngle = ik::safeAcos(MatrixUtils::vec3Dot(safeNormalize(uLocalTwist), safeNormalize(uloc))) * (uLocalTwist.z > 0 ? 1.f : -1.f);
+        }
 
         arm.upper->local.rotate = MatrixUtils::getMatrixFromEulerAngles(-upperAngle, 0, 0) * arm.upper->local.rotate;
 
@@ -1664,8 +1636,8 @@ namespace frik
         // The forearm arm bone must be rotated from its forward vector to its elbow-to-hand vector in its local space
         // Calculate Flr:  Fwr * rotTowardHand = Uwr * Flr   ===>   Flr = Uwr' * Fwr * rotTowardHand
         RE::NiMatrix3 Fwr = arm.forearm1->local.rotate * Uwr;
-        RE::NiPoint3 elbowHand = handPos - elbowWorld;
-        RE::NiPoint3 fLocalDir = Fwr * (MatrixUtils::vec3Norm(elbowHand));
+        RE::NiPoint3 elbowHand = solvedHandPos - elbowWorld;
+        RE::NiPoint3 fLocalDir = Fwr * safeNormalize(elbowHand);
 
         arm.forearm1->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(fLocalDir, RE::NiPoint3(1, 0, 0)) * arm.forearm1->local.rotate;
         Fwr = arm.forearm1->local.rotate * Uwr;
@@ -1679,14 +1651,16 @@ namespace frik
             // Find the angle the wrist is pointing and twist forearm3 appropriately
             //    Fwr * twist = Uwr * Flr   ===>   Flr = (Uwr' * Fwr) * twist = (Flr) * twist
 
-            RE::NiPoint3 wLocalDir = Fwr3 * (MatrixUtils::vec3Norm(handInSide));
+            RE::NiPoint3 wLocalDir = Fwr3 * safeNormalize(handInSide);
             wLocalDir.x = 0;
             RE::NiPoint3 forearm3Side = Fwr3.Transpose() * (RE::NiPoint3(0, 0, -1));
             // forearm is rotated 90 degrees already from hand so need this vector instead of 0,-1,0
-            RE::NiPoint3 floc = Fwr2 * (MatrixUtils::vec3Norm(forearm3Side));
+            RE::NiPoint3 floc = Fwr2 * safeNormalize(forearm3Side);
             floc.x = 0;
-            float fcos = MatrixUtils::vec3Dot(MatrixUtils::vec3Norm(wLocalDir), MatrixUtils::vec3Norm(floc));
-            float fsin = MatrixUtils::vec3Det(MatrixUtils::vec3Norm(wLocalDir), MatrixUtils::vec3Norm(floc), RE::NiPoint3(-1, 0, 0));
+            const RE::NiPoint3 normalizedWrist = safeNormalize(wLocalDir);
+            const RE::NiPoint3 normalizedForearm = safeNormalize(floc);
+            float fcos = std::clamp(MatrixUtils::vec3Dot(normalizedWrist, normalizedForearm), -1.0f, 1.0f);
+            float fsin = MatrixUtils::vec3Det(normalizedWrist, normalizedForearm, RE::NiPoint3(-1, 0, 0));
             float forearmAngle = -1 * negLeft * atan2f(fsin, fcos);
 
             arm.forearm2->local.rotate = MatrixUtils::getMatrixFromEulerAngles(negLeft * forearmAngle / 2, 0, 0) * arm.forearm2->local.rotate;
@@ -1703,6 +1677,9 @@ namespace frik
         arm.forearm1->local.translate = Uwr * ((elbowWorld - Uwp) / arm.upper->world.scale);
 
         float origEHLen = MatrixUtils::vec3Len(arm.hand->world.translate - arm.forearm1->world.translate);
+        if (!std::isfinite(origEHLen) || origEHLen <= 0.0001f) {
+            return;
+        }
         float forearmRatio = forearmLen / origEHLen * _root->local.scale;
 
         if (arm.forearm2 && !_inPowerArmor) {

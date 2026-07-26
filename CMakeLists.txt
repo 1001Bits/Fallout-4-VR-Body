@@ -235,3 +235,15 @@ add_custom_command(
           -DCONFIG=$(Configuration)
           -P "${ROOT_DIR}/cmake/package.cmake"
 )
+
+# Pure solver regression tests intentionally avoid game/runtime dependencies.
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(FRIKArmIKTests
+    tests/ArmIKTests.cpp
+    src/ik/ArmIK.cpp
+    src/ik/ArmIK.h
+  )
+  target_compile_features(FRIKArmIKTests PRIVATE cxx_std_23)
+  add_test(NAME FRIK.ArmIK COMMAND FRIKArmIKTests)
+endif()

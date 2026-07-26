@@ -1,11 +1,13 @@
 #pragma once
 
+#include <array>
 #include <map>
 
 #include "CullGeometryHandler.h"
 #include "SelfieHandler.h"
 #include "common/CommonUtils.h"
 #include "f4vr/PlayerNodes.h"
+#include "ik/ArmIK.h"
 #include "vrcf/VRControllersManager.h"
 
 namespace frik
@@ -197,6 +199,7 @@ namespace frik
         RE::NiTransform _leftHandPrevFrame;
         bool _rightHandDampingPrimed = false;
         bool _leftHandDampingPrimed = false;
+        std::array<ik::ArmContinuityState, 2> _armIKContinuity;
 
         // bones
         static std::map<std::string, std::pair<std::string, std::string>> makeFingerRelations();
