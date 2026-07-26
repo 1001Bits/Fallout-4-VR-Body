@@ -2,6 +2,8 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
+#include <span>
 #include <utility>
 
 #include "Config.h"
@@ -13,6 +15,7 @@
 #include "f4vr/F4VRSkelly.h"
 #include "f4vr/F4VRUtils.h"
 #include "ik/ArmIK.h"
+#include "ik/TorsoIK.h"
 #include "vrcf/VRControllersManager.h"
 
 using namespace common;
@@ -26,6 +29,33 @@ namespace
     constexpr float kTrackingDiscontinuityDistance = 100.0f;
     constexpr float kDirectionChangeDelaySeconds = 2.0f / 90.0f;
     constexpr float kStepRetargetDeceleration = -20.0f * 90.0f;
+
+    /**
+     * Set the cull flag on every descendant matching one of the given names using a
+     * single traversal.  Searching per name walked the same subtree once per name.
+     */
+    void hideNodesByName(RE::NiAVObject* node, const std::span<const char* const> names)
+    {
+        if (!node) {
+            return;
+        }
+
+        const auto* nodeName = node->name.c_str();
+        for (const auto* name : names) {
+            if (_stricmp(name, nodeName) == 0) {
+                node->flags.flags |= 0x1; // first bit is the cull flag, so the node is hidden
+                break;
+            }
+        }
+
+        if (const auto niNode = node->IsNode()) {
+            for (const auto& child : niNode->children) {
+                if (child) {
+                    hideNodesByName(child.get(), names);
+                }
+            }
+        }
+    }
 
     frik::ik::Vec3 toIKVector(const RE::NiPoint3& value) { return { value.x, value.y, value.z }; }
 
@@ -389,18 +419,25 @@ namespace frik
         const float neckYaw = getNeckYaw();
         const float neckPitch = getNeckPitch();
 
+        // Historically the avatar root absorbed this entire yaw, which swung the
+        // pelvis, legs, and feet whenever only the upper body turned.  Split it so
+        // the spine can carry part of it while the chest still lands where the
+        // root-only rotation put it.
+        const auto torsoTwist = ik::distributeTorsoTwist(neckYaw * 0.7f, torsoTwistSettings());
+
         if (!g_config.hideHead || (g_frik.isSelfieModeOn() && g_config.selfieIgnoreHideFlags)) {
             logger::trace("Setup Head");
             setupHead(neckYaw, neckPitch);
         }
 
         logger::trace("Set body under HMD");
-        setBodyUnderHMD(neckYaw);
+        setBodyUnderHMD(torsoTwist.root);
         updateDownFromRoot(); // Do world update now so that IK calculations have proper world reference
 
         // Now Set up body Posture and hook up the legs
         logger::trace("Set body posture...");
         setBodyPosture(neckPitch);
+        applyTorsoTwist(torsoTwist);
         updateDownFromRoot(); // Do world update now so that IK calculations have proper world reference
 
         if (_solveLegsThisFrame) {
@@ -790,9 +827,45 @@ namespace frik
     }
 
     /**
+     * Build the settings for splitting body yaw between the root and the spine.
+     * A zero share reproduces the legacy root-only rotation exactly.
+     */
+    ik::TorsoTwistSettings Skeleton::torsoTwistSettings()
+    {
+        return { .share = g_config.torsoTwistShare,
+            .spineFraction = 0.4f,
+            // Soft anatomical caps for thoracic/lumbar axial rotation.
+            .spineLimit = MatrixUtils::degreesToRads(20.0f),
+            .chestLimit = MatrixUtils::degreesToRads(30.0f) };
+    }
+
+    /**
+     * Twist the spine about its local bone axis.  Every spine-chain bone is offset
+     * from its parent purely along local X, so X is the twist axis; this matches the
+     * convention setupHead already relies on.  The yaw applied here was taken off
+     * the avatar root, so the chest reaches the same orientation as before while the
+     * pelvis, legs, and feet stay planted.
+     */
+    void Skeleton::applyTorsoTwist(const ik::TorsoTwist& twist) const
+    {
+        const auto twistNode = [](RE::NiAVObject* node, const float angle) {
+            if (!node || !std::isfinite(angle) || std::abs(angle) <= kVectorEpsilon) {
+                return;
+            }
+            const RE::NiMatrix3 rotated = node->local.rotate * MatrixUtils::getMatrixFromEulerAngles(angle, 0, 0);
+            if (isFinite(rotated) && isNearlyOrthonormal(rotated)) {
+                node->local.rotate = rotated;
+            }
+        };
+
+        twistNode(_spine, twist.spine);
+        twistNode(_chest, twist.chest);
+    }
+
+    /**
      * set up the body underneath the headset in a proper scale and orientation
      */
-    void Skeleton::setBodyUnderHMD(const float neckYaw)
+    void Skeleton::setBodyUnderHMD(const float rootYaw)
     {
         if (g_config.disableSmoothMovement) {
             _playerNodes->playerworldnode->local.translate.z = getAdjustedPlayerHMDOffset();
@@ -804,7 +877,9 @@ namespace frik
         RE::NiPoint3 planarHmdForward;
         const RE::NiPoint3 hmdForward = _trackedHeadPose.raw.rotate.Transpose() * RE::NiPoint3(0, 1, 0);
         if (tryNormalizePlanar(hmdForward, planarHmdForward)) {
-            _forwardDir = MatrixUtils::rotateXY(planarHmdForward, neckYaw * 0.7f);
+            // rootYaw is already the caller's share of the body yaw; the historical
+            // 0.7 weighting is applied before the root/spine split.
+            _forwardDir = MatrixUtils::rotateXY(planarHmdForward, rootYaw);
         }
         _sidewaysRDir = RE::NiPoint3(_forwardDir.y, -_forwardDir.x, 0);
 
@@ -926,21 +1001,27 @@ namespace frik
     // TODO: does it do anything? check if it works at all
     void Skeleton::fixArmor() const
     {
+        // "LArm_UpperArm" is already resolved into the cached arm binding, so reuse
+        // it instead of searching the tree again on every Power Armor frame.  The
+        // previous code dereferenced the search result unchecked, which crashed on
+        // any skeleton that had pauldrons but no upper-arm bone.
+        if (!_leftArm.upper || !_root || !isFinite(_leftArm.upper->world) || !isFinite(_root->world)) {
+            return;
+        }
+
         auto lPauldron = findNode(_root, "L_Pauldron");
         auto rPauldron = findNode(_root, "R_Pauldron");
-
         if (!lPauldron || !rPauldron) {
             return;
         }
 
-        //float delta = findNode("LArm_Collarbone", _root)->world.translate.z - _root->world.translate.z;
-        const float delta = findNode(_root, "LArm_UpperArm")->world.translate.z - _root->world.translate.z;
-        if (lPauldron) {
-            lPauldron->local.translate.z = delta - 15.0f;
+        const float delta = _leftArm.upper->world.translate.z - _root->world.translate.z;
+        if (!std::isfinite(delta)) {
+            return;
         }
-        if (rPauldron) {
-            rPauldron->local.translate.z = delta - 15.0f;
-        }
+
+        lPauldron->local.translate.z = delta - 15.0f;
+        rPauldron->local.translate.z = delta - 15.0f;
     }
 
     void Skeleton::walk()
@@ -1374,67 +1455,14 @@ namespace frik
 
     void Skeleton::hideFistHelpers() const
     {
-        if (!isLeftHandedMode()) {
-            RE::NiAVObject* node = findNode(_playerNodes->primaryWandNode, "fist_M_Right_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1; // first bit sets the cull flag so it will be hidden;
-            }
+        // Handedness only decides which wand holds which triplet, and every helper is
+        // hidden either way, so the union of names is handedness-independent.  Hiding
+        // the whole set in one traversal per wand replaces six traversals per frame.
+        static constexpr const char* fistHelperNames[] = { "fist_M_Right_HELPER", "fist_F_Right_HELPER", "PA_fist_R_HELPER", "fist_M_Left_HELPER", "fist_F_Left_HELPER",
+            "PA_fist_L_HELPER" };
 
-            node = findNode(_playerNodes->primaryWandNode, "fist_F_Right_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1;
-            }
-
-            node = findNode(_playerNodes->primaryWandNode, "PA_fist_R_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1;
-            }
-
-            node = findNode(_playerNodes->SecondaryWandNode, "fist_M_Left_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1; // first bit sets the cull flag so it will be hidden;
-            }
-
-            node = findNode(_playerNodes->SecondaryWandNode, "fist_F_Left_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1;
-            }
-
-            node = findNode(_playerNodes->SecondaryWandNode, "PA_fist_L_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1;
-            }
-        } else {
-            RE::NiAVObject* node = findNode(_playerNodes->SecondaryWandNode, "fist_M_Right_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1; // first bit sets the cull flag so it will be hidden;
-            }
-
-            node = findNode(_playerNodes->SecondaryWandNode, "fist_F_Right_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1;
-            }
-
-            node = findNode(_playerNodes->SecondaryWandNode, "PA_fist_R_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1;
-            }
-
-            node = findNode(_playerNodes->primaryWandNode, "fist_M_Left_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1; // first bit sets the cull flag so it will be hidden;
-            }
-
-            node = findNode(_playerNodes->primaryWandNode, "fist_F_Left_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1;
-            }
-
-            node = findNode(_playerNodes->primaryWandNode, "PA_fist_L_HELPER");
-            if (node != nullptr) {
-                node->flags.flags |= 0x1;
-            }
-        }
+        hideNodesByName(_playerNodes->primaryWandNode, fistHelperNames);
+        hideNodesByName(_playerNodes->SecondaryWandNode, fistHelperNames);
 
         if (const auto uiNode = findNode(_playerNodes->SecondaryWandNode, "Point002")) {
             uiNode->local.scale = 0.0;

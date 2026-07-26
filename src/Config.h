@@ -132,6 +132,7 @@ namespace frik
         float rightArmLength = 36.74f;
         float hmdPivotCalibrationDuration = 10.0f;
         float legSlackAutoAdjustRate = 3.0f;
+        float torsoTwistShare = 0.0f;
 
         // Head Geometry Hide
         bool hideHead = false;

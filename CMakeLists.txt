@@ -198,6 +198,17 @@ if(BUILD_TESTING)
   target_compile_features(FRIKArmIKTests PRIVATE cxx_std_23)
   set_property(TARGET FRIKArmIKTests PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
   add_test(NAME FRIK.ArmIK COMMAND FRIKArmIKTests)
+
+  add_executable(FRIKTorsoIKTests
+    tests/TorsoIKTests.cpp
+    src/ik/TorsoIK.cpp
+    src/ik/TorsoIK.h
+    src/ik/ArmIK.cpp
+    src/ik/ArmIK.h
+  )
+  target_compile_features(FRIKTorsoIKTests PRIVATE cxx_std_23)
+  set_property(TARGET FRIKTorsoIKTests PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+  add_test(NAME FRIK.TorsoIK COMMAND FRIKTorsoIKTests)
 endif()
 
 # >>> fix a warning with /Ob2 being overridden with /Ob3

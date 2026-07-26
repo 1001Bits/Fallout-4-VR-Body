@@ -303,6 +303,7 @@ namespace frik
         rightArmLength = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fRightArmLength", armLength));
         hmdPivotCalibrationDuration = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fHmdPivotCalibrationDuration", 10.0f));
         legSlackAutoAdjustRate = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fLegSlackAutoAdjustRate", 3.0f));
+        torsoTwistShare = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fTorsoTwistShare", 0.0f));
         validateSolverCalibrationConfig();
 
         // armLength remains the authoritative compatibility alias while both
@@ -466,6 +467,7 @@ namespace frik
         ini.SetDoubleValue(INI_SECTION_MAIN, "fRightArmLength", rightArmLength);
         ini.SetDoubleValue(INI_SECTION_MAIN, "fHmdPivotCalibrationDuration", hmdPivotCalibrationDuration);
         ini.SetDoubleValue(INI_SECTION_MAIN, "fLegSlackAutoAdjustRate", legSlackAutoAdjustRate);
+        ini.SetDoubleValue(INI_SECTION_MAIN, "fTorsoTwistShare", torsoTwistShare);
         ini.SetBoolValue(INI_SECTION_MAIN, "hidePipboy", hidePipboy);
         ini.SetDoubleValue(INI_SECTION_MAIN, "PipboyScale", pipBoyScale);
         ini.SetBoolValue(INI_SECTION_MAIN, "HoloPipBoyEnabled", isHoloPipboy);
@@ -500,6 +502,7 @@ namespace frik
         validate("fRightArmLength", rightArmLength, 15.0f, 80.0f, armLength);
         validate("fHmdPivotCalibrationDuration", hmdPivotCalibrationDuration, 4.0f, 30.0f, 10.0f);
         validate("fLegSlackAutoAdjustRate", legSlackAutoAdjustRate, 0.0f, 10.0f, 3.0f);
+        validate("fTorsoTwistShare", torsoTwistShare, 0.0f, 0.9f, 0.0f);
     }
 
     /**

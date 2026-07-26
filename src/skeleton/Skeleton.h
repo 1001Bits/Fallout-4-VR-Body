@@ -9,6 +9,7 @@
 #include "common/CommonUtils.h"
 #include "f4vr/PlayerNodes.h"
 #include "ik/ArmIK.h"
+#include "ik/TorsoIK.h"
 #include "vrcf/VRControllersManager.h"
 
 namespace frik
@@ -81,7 +82,8 @@ namespace frik
         bool canUseProceduralLegs() const;
         void restoreNodesToDefault();
         void setupHead(float neckYaw, float neckPitch) const;
-        void setBodyUnderHMD(float neckYaw);
+        void setBodyUnderHMD(float rootYaw);
+        void applyTorsoTwist(const ik::TorsoTwist& twist) const;
         void setBodyPosture(float neckPitch);
         void setKneePos();
         void walk();
@@ -103,6 +105,7 @@ namespace frik
 
         // Utils - Body Positioning
         float getNeckYaw();
+        static ik::TorsoTwistSettings torsoTwistSettings();
         float getNeckPitch() const;
         float getBodyPitch(float neckPitch) const;
         float getCorrectedUprightHmdHeight() const;
