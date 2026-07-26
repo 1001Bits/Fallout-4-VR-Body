@@ -12,13 +12,26 @@ namespace frik
 {
     struct ArmNodes
     {
-        RE::NiAVObject* shoulder;
-        RE::NiAVObject* upper;
-        RE::NiAVObject* upperT1;
-        RE::NiAVObject* forearm1;
-        RE::NiAVObject* forearm2;
-        RE::NiAVObject* forearm3;
-        RE::NiAVObject* hand;
+        RE::NiAVObject* shoulder = nullptr;
+        RE::NiAVObject* upper = nullptr;
+        RE::NiAVObject* upperT1 = nullptr;
+        RE::NiAVObject* forearm1 = nullptr;
+        RE::NiAVObject* forearm2 = nullptr;
+        RE::NiAVObject* forearm3 = nullptr;
+        RE::NiAVObject* hand = nullptr;
+    };
+
+    /**
+     * One coherent HMD sample used by every body-IK calculation in a frame.
+     *
+     * Fallout's NiMatrix convention stores the world-to-local rotation in the
+     * world transform.  A local offset is therefore moved to world space with
+     * world.rotate.Transpose().
+     */
+    struct TrackedHeadPose
+    {
+        RE::NiTransform raw;
+        RE::NiPoint3 pivot;
     };
 
     class Skeleton
@@ -28,6 +41,9 @@ namespace frik
             _root(rootNode), _inPowerArmor(inPowerArmor)
         {
             _curentPosition = RE::NiPoint3(0, 0, 0);
+            _lastPosition = _curentPosition;
+            _forwardDir = RE::NiPoint3(0, 1, 0);
+            _sidewaysRDir = RE::NiPoint3(1, 0, 0);
             _walkingState = 0;
             initializeNodes();
         }
@@ -55,9 +71,12 @@ namespace frik
 
         // on frame update - skeleton update
         void setTime();
+        bool sampleTrackedHeadPose();
+        void resetMotionState();
+        bool hasRequiredNodes() const;
         void restoreNodesToDefault();
         void setupHead(float neckYaw, float neckPitch) const;
-        void setBodyUnderHMD(float neckYaw, float neckPitch);
+        void setBodyUnderHMD(float neckYaw);
         void setBodyPosture(float neckPitch);
         void setKneePos();
         void walk();
@@ -78,9 +97,10 @@ namespace frik
         void setPredefinedHandPose(const std::string& bone);
 
         // Utils - Body Positioning
-        float getNeckYaw() const;
+        float getNeckYaw();
         float getNeckPitch() const;
         float getBodyPitch(float neckPitch) const;
+        float getCorrectedUprightHmdHeight() const;
         void rotateLeg(uint32_t pos, float angle) const;
 
         // root node and is in power armor define the Skeleton instance
@@ -99,6 +119,13 @@ namespace frik
         // Camera positions
         RE::NiPoint3 _curentPosition;
         RE::NiPoint3 _lastPosition;
+        TrackedHeadPose _trackedHeadPose;
+        RE::NiPoint3 _lastPivotOffset;
+        bool _hasValidTrackedHeadPose = false;
+        bool _trackingWasValid = false;
+        bool _hasLastPivotConfig = false;
+        bool _lastPivotCorrectionEnabled = false;
+        float _lastNeckYaw = 0.0f;
         inline static float _comfortSneakCameraOffsetAdjustment = -1.0f;
 
         // ???
@@ -108,13 +135,16 @@ namespace frik
 
         // skeleton nodes
         f4vr::PlayerNodes* _playerNodes;
-        RE::NiNode* _rightHand;
-        RE::NiNode* _leftHand;
-        RE::NiNode* _head;
-        RE::NiNode* _spine;
-        RE::NiNode* _chest;
-        float _torsoLen;
-        float _legLen;
+        RE::NiNode* _rightHand = nullptr;
+        RE::NiNode* _leftHand = nullptr;
+        RE::NiNode* _head = nullptr;
+        RE::NiNode* _spine = nullptr;
+        RE::NiNode* _chest = nullptr;
+        RE::NiNode* _com = nullptr;
+        RE::NiNode* _neck = nullptr;
+        RE::NiNode* _spine1 = nullptr;
+        float _torsoLen = 0.0f;
+        float _legLen = 0.0f;
         ArmNodes _rightArm;
         ArmNodes _leftArm;
 

@@ -1,6 +1,7 @@
 #include "Skeleton.h"
 
 #include <array>
+#include <cmath>
 
 #include "Config.h"
 #include "FRIK.h"
@@ -18,6 +19,57 @@ using namespace vrcf;
 
 namespace
 {
+    constexpr float kVectorEpsilon = 0.0001f;
+    constexpr float kMaximumTrackedPosition = 1000000.0f;
+    constexpr float kTrackingDiscontinuityDistance = 100.0f;
+
+    bool isFinite(const RE::NiPoint3& point)
+    {
+        return std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z) &&
+            std::abs(point.x) < kMaximumTrackedPosition &&
+            std::abs(point.y) < kMaximumTrackedPosition &&
+            std::abs(point.z) < kMaximumTrackedPosition;
+    }
+
+    bool isFinite(const RE::NiMatrix3& matrix)
+    {
+        for (std::uint32_t row = 0; row < 3; ++row) {
+            for (std::uint32_t column = 0; column < 3; ++column) {
+                if (!std::isfinite(matrix.entry[row][column])) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    bool isFinite(const RE::NiTransform& transform)
+    {
+        return isFinite(transform.translate) && isFinite(transform.rotate) &&
+            std::isfinite(transform.scale) && transform.scale > kVectorEpsilon;
+    }
+
+    bool tryNormalize(const RE::NiPoint3& input, RE::NiPoint3& output)
+    {
+        const float length = MatrixUtils::vec3Len(input);
+        if (!std::isfinite(length) || length <= kVectorEpsilon) {
+            return false;
+        }
+
+        output = input / length;
+        return isFinite(output);
+    }
+
+    bool tryNormalizePlanar(const RE::NiPoint3& input, RE::NiPoint3& output)
+    {
+        return tryNormalize(RE::NiPoint3(input.x, input.y, 0.0f), output);
+    }
+
+    bool approximatelyEqual(const RE::NiPoint3& lhs, const RE::NiPoint3& rhs)
+    {
+        return MatrixUtils::vec3Len(lhs - rhs) <= kVectorEpsilon;
+    }
+
     /**
      * Hack to handle comfort sneak affecting the height of the player without real-world body change.
      * By setting static body pitch the body position doesn't change, making it easier to handle skeleton
@@ -60,14 +112,23 @@ namespace frik
         _playerNodes = getPlayerNodes();
 
         const auto fpSkeleton = getFirstPersonSkeleton();
-        _rightHand = findNode(fpSkeleton, "RArm_Hand");
-        _leftHand = findNode(fpSkeleton, "LArm_Hand");
-        _rightHandPrevFrame = _rightHand->world;
-        _leftHandPrevFrame = _leftHand->world;
+        if (fpSkeleton) {
+            _rightHand = findNode(fpSkeleton, "RArm_Hand");
+            _leftHand = findNode(fpSkeleton, "LArm_Hand");
+        }
+        if (_rightHand) {
+            _rightHandPrevFrame = _rightHand->world;
+        }
+        if (_leftHand) {
+            _leftHandPrevFrame = _leftHand->world;
+        }
 
         _head = findNode(_root, "Head");
         _spine = findNode(_root, "SPINE2");
         _chest = findNode(_root, "Chest");
+        _com = findNode(_root, "COM");
+        _neck = findNode(_root, "Neck");
+        _spine1 = findNode(_root, "SPINE1");
 
         // Setup Arms
         initArmsNodes();
@@ -130,13 +191,20 @@ namespace frik
 
     void Skeleton::setBodyLen()
     {
-        _torsoLen = MatrixUtils::vec3Len(findNode(_root, "Camera")->world.translate - findNode(_root, "COM")->world.translate);
-        _torsoLen *= g_config.playerHeight / DEFAULT_CAMERA_HEIGHT;
+        const auto camera = findNode(_root, "Camera");
+        if (camera && _com) {
+            _torsoLen = MatrixUtils::vec3Len(camera->world.translate - _com->world.translate);
+        }
 
-        _legLen = MatrixUtils::vec3Len(findNode(_root, "LLeg_Thigh")->world.translate - findNode(_root, "Pelvis")->world.translate);
-        _legLen += MatrixUtils::vec3Len(findNode(_root, "LLeg_Calf")->world.translate - findNode(_root, "LLeg_Thigh")->world.translate);
-        _legLen += MatrixUtils::vec3Len(findNode(_root, "LLeg_Foot")->world.translate - findNode(_root, "LLeg_Calf")->world.translate);
-        _legLen *= g_config.playerHeight / DEFAULT_CAMERA_HEIGHT;
+        const auto pelvis = findNode(_root, "Pelvis");
+        const auto thigh = findNode(_root, "LLeg_Thigh");
+        const auto calf = findNode(_root, "LLeg_Calf");
+        const auto foot = findNode(_root, "LLeg_Foot");
+        if (pelvis && thigh && calf && foot) {
+            _legLen = MatrixUtils::vec3Len(thigh->world.translate - pelvis->world.translate);
+            _legLen += MatrixUtils::vec3Len(calf->world.translate - thigh->world.translate);
+            _legLen += MatrixUtils::vec3Len(foot->world.translate - calf->world.translate);
+        }
     }
 
     /**
@@ -146,9 +214,18 @@ namespace frik
     {
         setTime();
 
-        // save last position at this time for anyone doing speed calculations
-        _lastPosition = _curentPosition;
-        _curentPosition = getCameraPosition();
+        if (!hasRequiredNodes()) {
+            logger::sample("Cannot update IK: required skeleton/player nodes are unavailable");
+            _trackingWasValid = false;
+            resetMotionState();
+            return;
+        }
+
+        // Sample translation and rotation from the same HMD transform.  All IK
+        // consumers use the resulting virtual anatomical pivot for this frame.
+        if (!sampleTrackedHeadPose()) {
+            return;
+        }
 
         logger::trace("Hide Wands...");
         setWandsVisibility(false, true);
@@ -167,7 +244,7 @@ namespace frik
         }
 
         logger::trace("Set body under HMD");
-        setBodyUnderHMD(neckYaw, neckPitch);
+        setBodyUnderHMD(neckYaw);
         updateDownFromRoot(); // Do world update now so that IK calculations have proper world reference
 
         // Now Set up body Posture and hook up the legs
@@ -226,6 +303,127 @@ namespace frik
         QueryPerformanceFrequency(&_freqCounter);
         QueryPerformanceCounter(&_timer);
         _frameTime = static_cast<float>(_timer.QuadPart - _prevTime.QuadPart) / _freqCounter.QuadPart;
+        if (!std::isfinite(_frameTime) || _frameTime <= 0.0f) {
+            _frameTime = 1.0f / 90.0f;
+        }
+        _frameTime = std::min(_frameTime, 0.1f);
+    }
+
+    bool Skeleton::sampleTrackedHeadPose()
+    {
+        RE::NiTransform rawPose;
+        bool usedCameraFallback = false;
+
+        if (_playerNodes->HmdNode && isFinite(_playerNodes->HmdNode->world)) {
+            rawPose = _playerNodes->HmdNode->world;
+        } else {
+            const auto playerCamera = getPlayerCamera();
+            if (!playerCamera || !playerCamera->cameraNode || !isFinite(playerCamera->cameraNode->world)) {
+                if (_trackingWasValid) {
+                    logger::warn("HMD tracking became invalid; retaining the last valid IK pose");
+                } else {
+                    logger::sample("Cannot update IK: no valid coherent HMD/camera transform");
+                }
+                _trackingWasValid = false;
+                resetMotionState();
+                return false;
+            }
+
+            rawPose = playerCamera->cameraNode->world;
+            usedCameraFallback = true;
+            logger::sample(3000, "HmdNode transform is invalid; using the complete camera transform for IK");
+        }
+
+        const auto playerCamera = getPlayerCamera();
+        if (!usedCameraFallback && playerCamera && playerCamera->cameraNode && isFinite(playerCamera->cameraNode->world)) {
+            const float cameraDelta = MatrixUtils::vec3Len(playerCamera->cameraNode->world.translate - rawPose.translate);
+            if (std::isfinite(cameraDelta) && cameraDelta > 5.0f) {
+                logger::sample(3000, "HMD and camera origins differ by {:.2f} units; IK is using the coherent HmdNode transform", cameraDelta);
+            }
+        }
+
+        const RE::NiPoint3 configuredOffset(
+            g_config.hmdPivotOffsetX,
+            g_config.hmdPivotOffsetY,
+            g_config.hmdPivotOffsetZ);
+        bool correctionEnabled = g_config.enableHmdPivotCorrection;
+
+        RE::NiPoint3 pivot = rawPose.translate;
+        if (correctionEnabled) {
+            if (!isFinite(configuredOffset)) {
+                logger::sample(3000, "HMD pivot correction offset is invalid; using the raw HMD origin");
+                correctionEnabled = false;
+            } else {
+                // NiMatrix world rotations are world-to-local.  Convert the
+                // pivot->tracker lever arm to world space with Transpose, then
+                // subtract it from the tracked origin to recover the pivot.
+                const RE::NiPoint3 leverWorld = rawPose.rotate.Transpose() * (configuredOffset * rawPose.scale);
+                pivot -= leverWorld;
+            }
+        }
+
+        if (!isFinite(pivot)) {
+            if (_trackingWasValid) {
+                logger::warn("Corrected HMD pivot became invalid; retaining the last valid IK pose");
+            }
+            _trackingWasValid = false;
+            resetMotionState();
+            return false;
+        }
+
+        const bool correctionChanged = !_hasLastPivotConfig ||
+            correctionEnabled != _lastPivotCorrectionEnabled ||
+            !approximatelyEqual(configuredOffset, _lastPivotOffset);
+        const bool trackingReacquired = !_trackingWasValid;
+        const bool positionDiscontinuity = _hasValidTrackedHeadPose &&
+            MatrixUtils::vec3Len(pivot - _curentPosition) > kTrackingDiscontinuityDistance;
+
+        _lastPosition = _hasValidTrackedHeadPose ? _curentPosition : pivot;
+        _curentPosition = pivot;
+        _trackedHeadPose.raw = rawPose;
+        _trackedHeadPose.pivot = pivot;
+        _hasValidTrackedHeadPose = true;
+        _trackingWasValid = true;
+        _lastPivotCorrectionEnabled = correctionEnabled;
+        _lastPivotOffset = configuredOffset;
+        _hasLastPivotConfig = true;
+
+        if (trackingReacquired || correctionChanged || positionDiscontinuity) {
+            if (positionDiscontinuity) {
+                logger::sample(3000, "HMD position discontinuity detected; resetting IK motion history");
+            }
+            resetMotionState();
+        }
+
+        return true;
+    }
+
+    void Skeleton::resetMotionState()
+    {
+        _lastPosition = _curentPosition;
+        _prevSpeed = 0.0f;
+        _walkingState = 0;
+        _currentStepTime = 0.0f;
+        _stepTimeinStep = 0.0f;
+        _footStepping = 0;
+        _delayFrame = 0;
+        _stepDir = _forwardDir;
+
+        if (_rightHand && isFinite(_rightHand->world)) {
+            _rightHandPrevFrame = _rightHand->world;
+        }
+        if (_leftHand && isFinite(_leftHand->world)) {
+            _leftHandPrevFrame = _leftHand->world;
+        }
+    }
+
+    bool Skeleton::hasRequiredNodes() const
+    {
+        return _root && _root->parent && _playerNodes &&
+            _playerNodes->playerworldnode &&
+            _playerNodes->primaryWandNode && _playerNodes->SecondaryWandNode &&
+            _head && _spine && _chest && _com && _neck && _spine1 &&
+            _rightHand && _leftHand;
     }
 
     /**
@@ -253,25 +451,22 @@ namespace frik
         _head->UpdateWorldData(ud);
     }
 
-    // below takes the two vectors from hmd to each hand and sums them to determine a center axis in which to see how much the hmd has rotated
-    // A secondary angle is also calculated which is 90 degrees on the z axis up to handle when the hands are approaching the z plane of the hmd
-    // this helps keep the body stable through a wide range of hand poses
-    // this still struggles with hands close to the face and with one hand low and one hand high.
-    // Will need to take prog advice to add weights to these positions which I'll do at a later date.
-    float Skeleton::getNeckYaw() const
+    // Estimate head yaw relative to the body from the two pivot-to-controller
+    // directions.  Per Parger 3.1, each projected direction is normalized
+    // before the sum so controller distance cannot dominate the estimate.
+    float Skeleton::getNeckYaw()
     {
-        if (!_playerNodes) {
-            logger::info("player nodes not set in neck yaw");
-            return 0.0;
+        if (!_hasValidTrackedHeadPose) {
+            return _lastNeckYaw;
         }
 
-        const RE::NiPoint3 pos = _playerNodes->UprightHmdNode->world.translate;
-        const RE::NiPoint3 hmdToLeft = _playerNodes->SecondaryWandNode->world.translate - pos;
-        const RE::NiPoint3 hmdToRight = _playerNodes->primaryWandNode->world.translate - pos;
+        const RE::NiPoint3 hmdToLeft = _playerNodes->SecondaryWandNode->world.translate - _trackedHeadPose.pivot;
+        const RE::NiPoint3 hmdToRight = _playerNodes->primaryWandNode->world.translate - _trackedHeadPose.pivot;
         float weight = 1.0f;
 
-        if (MatrixUtils::vec3Len(hmdToLeft) < 10.0f || MatrixUtils::vec3Len(hmdToRight) < 10.0f) {
-            return 0.0;
+        if (!isFinite(hmdToLeft) || !isFinite(hmdToRight) ||
+            MatrixUtils::vec3Len(hmdToLeft) < 10.0f || MatrixUtils::vec3Len(hmdToRight) < 10.0f) {
+            return _lastNeckYaw;
         }
 
         // handle excessive angles when hand is above the head.
@@ -285,33 +480,58 @@ namespace frik
 
         // hands moving across the chest rotate too much.   try to handle with below
         // wp = parWp + parWr * lp =>   lp = (wp - parWp) * parWr'
-        const RE::NiPoint3 locLeft = _playerNodes->HmdNode->world.rotate * (hmdToLeft);
-        const RE::NiPoint3 locRight = _playerNodes->HmdNode->world.rotate * (hmdToRight);
+        const RE::NiPoint3 locLeft = _trackedHeadPose.raw.rotate * hmdToLeft;
+        const RE::NiPoint3 locRight = _trackedHeadPose.raw.rotate * hmdToRight;
 
         if (locLeft.x > locRight.x) {
             const float delta = locRight.x - locLeft.x;
             weight = (std::max)(weight + 0.02f * delta, 0.0f);
         }
 
-        const RE::NiPoint3 sum = hmdToRight + hmdToLeft;
+        RE::NiPoint3 leftDirection;
+        RE::NiPoint3 rightDirection;
+        if (!tryNormalizePlanar(hmdToLeft, leftDirection) || !tryNormalizePlanar(hmdToRight, rightDirection)) {
+            return _lastNeckYaw;
+        }
 
-        const RE::NiPoint3 forwardDir = MatrixUtils::vec3Norm(_playerNodes->HmdNode->world.rotate * (MatrixUtils::vec3Norm(sum)));
-        // rotate sum to local hmd space to get the proper angle
-        const RE::NiPoint3 hmdForwardDir = MatrixUtils::vec3Norm(_playerNodes->HmdNode->world.rotate * (_playerNodes->HmdNode->local.translate));
+        RE::NiPoint3 handForward;
+        if (!tryNormalizePlanar(leftDirection + rightDirection, handForward)) {
+            return _lastNeckYaw;
+        }
 
-        const float anglePrime = atan2f(forwardDir.x, forwardDir.y);
-        const float angleSec = atan2f(forwardDir.x, forwardDir.z);
+        RE::NiPoint3 hmdForward;
+        if (!tryNormalizePlanar(_trackedHeadPose.raw.rotate.Transpose() * RE::NiPoint3(0, 1, 0), hmdForward)) {
+            hmdForward = _forwardDir;
+        }
 
-        const float pitchDiff = atan2f(hmdForwardDir.y, hmdForwardDir.z) - atan2f(forwardDir.z, forwardDir.y);
+        const float dot = std::clamp(MatrixUtils::vec3Dot(hmdForward, handForward), -1.0f, 1.0f);
+        const float determinant = handForward.x * hmdForward.y - handForward.y * hmdForward.x;
+        const float relativeYaw = atan2f(determinant, dot);
+        const float neckYaw = std::clamp(
+            -relativeYaw * weight,
+            MatrixUtils::degreesToRads(-50.0f),
+            MatrixUtils::degreesToRads(50.0f));
 
-        const float angleFinal = fabs(pitchDiff) > MatrixUtils::degreesToRads(80.0f) ? angleSec : anglePrime;
-        return std::clamp(-angleFinal * weight, MatrixUtils::degreesToRads(-50.0f), MatrixUtils::degreesToRads(50.0f));
+        if (std::isfinite(neckYaw)) {
+            _lastNeckYaw = neckYaw;
+        }
+        return _lastNeckYaw;
     }
 
     float Skeleton::getNeckPitch() const
     {
-        const RE::NiPoint3& lookDir = MatrixUtils::vec3Norm(_playerNodes->HmdNode->world.rotate * (_playerNodes->HmdNode->local.translate));
-        return atan2f(lookDir.y, lookDir.z);
+        if (!_hasValidTrackedHeadPose) {
+            return 0.0f;
+        }
+
+        RE::NiPoint3 lookDirection;
+        if (!tryNormalize(_trackedHeadPose.raw.rotate.Transpose() * RE::NiPoint3(0, 1, 0), lookDirection)) {
+            return 0.0f;
+        }
+
+        const float horizontalLength = std::sqrt(
+            lookDirection.x * lookDirection.x + lookDirection.y * lookDirection.y);
+        return atan2f(lookDirection.z, horizontalLength);
     }
 
     float Skeleton::getBodyPitch(const float neckPitch) const
@@ -323,33 +543,48 @@ namespace frik
         constexpr float basePitch = 105.3f;
         constexpr float weight = 0.1f;
 
-        const float curHeight = g_config.playerHeight;
-        const float heightCalc = std::abs((curHeight - (_playerNodes->UprightHmdNode->local.translate.z + getAdjustedPlayerHMDOffset())) / curHeight);
+        const float curHeight = std::max(std::abs(g_config.playerHeight), kVectorEpsilon);
+        const float correctedHeight = getCorrectedUprightHmdHeight() + getAdjustedPlayerHMDOffset();
+        const float heightCalc = std::clamp(std::abs((curHeight - correctedHeight) / curHeight), 0.0f, 1.0f);
         const float angle = heightCalc * (basePitch + weight * MatrixUtils::radsToDegrees(neckPitch));
         return MatrixUtils::degreesToRads(angle);
+    }
+
+    float Skeleton::getCorrectedUprightHmdHeight() const
+    {
+        if (!_hasValidTrackedHeadPose || !_playerNodes || !_playerNodes->UprightHmdNode) {
+            return 0.0f;
+        }
+
+        float parentScale = 1.0f;
+        if (_playerNodes->playerworldnode && std::isfinite(_playerNodes->playerworldnode->world.scale) &&
+            std::abs(_playerNodes->playerworldnode->world.scale) > kVectorEpsilon) {
+            parentScale = _playerNodes->playerworldnode->world.scale;
+        }
+
+        const float pivotCorrectionZ =
+            (_trackedHeadPose.pivot.z - _trackedHeadPose.raw.translate.z) / parentScale;
+        return _playerNodes->UprightHmdNode->local.translate.z + pivotCorrectionZ;
     }
 
     /**
      * set up the body underneath the headset in a proper scale and orientation
      */
-    void Skeleton::setBodyUnderHMD(const float neckYaw, const float neckPitch)
+    void Skeleton::setBodyUnderHMD(const float neckYaw)
     {
         if (g_config.disableSmoothMovement) {
             _playerNodes->playerworldnode->local.translate.z = getAdjustedPlayerHMDOffset();
             updateDown(_playerNodes->playerworldnode, true);
         }
 
-        //		float y    = (*g_playerCamera)->cameraNode->world.rotate.data[1][1];  // Middle column is y vector.   Grab just x and y portions and make a unit vector.    This can be used to rotate body to always be orientated with the hmd.
-        //	float x    = (*g_playerCamera)->cameraNode->world.rotate.data[1][0];  //  Later will use this vector as the basis for the rest of the IK
         const float z = _root->local.translate.z;
-        //	float z = groundHeight;
 
-        Quaternion qa;
-        qa.setAngleAxis(-neckPitch, RE::NiPoint3(-1, 0, 0));
-
-        const RE::NiMatrix3 newRot = qa.getMatrix() * _playerNodes->HmdNode->local.rotate;
-
-        _forwardDir = MatrixUtils::rotateXY(RE::NiPoint3(newRot.entry[1][0], newRot.entry[1][1], 0), neckYaw * 0.7f);
+        RE::NiPoint3 planarHmdForward;
+        const RE::NiPoint3 hmdForward =
+            _trackedHeadPose.raw.rotate.Transpose() * RE::NiPoint3(0, 1, 0);
+        if (tryNormalizePlanar(hmdForward, planarHmdForward)) {
+            _forwardDir = MatrixUtils::rotateXY(planarHmdForward, neckYaw * 0.7f);
+        }
         _sidewaysRDir = RE::NiPoint3(_forwardDir.y, -_forwardDir.x, 0);
 
         RE::NiNode* body = _root->parent;
@@ -364,61 +599,88 @@ namespace frik
         _root->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(back, bodyDir) * body->world.rotate.Transpose();
         _root->local.translate = body->world.translate - _curentPosition;
         _root->local.translate.z = z;
-        //_root->local.translate *= 0.0f;
-        //_root->local.translate.y = g_config.playerBodyOffsetForwardStanding - 6.0f;
-        _root->local.scale = g_config.playerHeight / DEFAULT_CAMERA_HEIGHT; // set scale based off specified user height
+        // PlayerHeight scaling is legacy and breaks weapon alignment.  Body
+        // dimensions are calibration inputs only; the rendered skeleton stays
+        // at its authored scale.
+        _root->local.scale = 1.0f;
     }
 
     void Skeleton::setBodyPosture(const float neckPitch)
     {
-        const float bodyPitch = _inPowerArmor ? getBodyPitch(neckPitch) : getBodyPitch(neckPitch) / 1.2f;
+        const float requestedBodyPitch = _inPowerArmor ? getBodyPitch(neckPitch) : getBodyPitch(neckPitch) / 1.2f;
+        const float bodyPitch = std::clamp(
+            requestedBodyPitch,
+            MatrixUtils::degreesToRads(-85.0f),
+            MatrixUtils::degreesToRads(85.0f));
 
-        RE::NiNode* com = findNode(_root, "COM");
-        const RE::NiNode* neck = findNode(_root, "Neck");
-        RE::NiNode* spine = findNode(_root, "SPINE1");
+        const auto leftCalf = findNode(_com, "LLeg_Calf");
+        const auto rightCalf = findNode(_com, "RLeg_Calf");
+        if (!leftCalf || !rightCalf) {
+            return;
+        }
 
-        _leftKneePos = findNode(com, "LLeg_Calf")->world.translate;
-        _rightKneePos = findNode(com, "RLeg_Calf")->world.translate;
+        _leftKneePos = leftCalf->world.translate;
+        _rightKneePos = rightCalf->world.translate;
 
-        com->local.translate.x = 0.0;
-        com->local.translate.y = 0.0;
+        _com->local.translate.x = 0.0f;
+        _com->local.translate.y = 0.0f;
 
         // comfort sneak changes the height of the avatar without the player changing height in the real world, need to adjust for it
         const float comfortSneakAdjustZ = isComfortSneakMode() && isPlayerSneaking() ? _comfortSneakCameraOffsetAdjustment * _comfortSneakCameraOffsetAdjustment : 1.0f;
 
-        // small offset to (1) not change player height when looking up/down and (2) move the body back, especially when looking down
-        const float xOffsetByNeckPitch = fmaxf(0, (isComfortSneakHackEnabled() ? 2.0f : 5.0f) * fabs(neckPitch) * _root->local.scale);
-        const float zOffsetByNeckPitch = 6.0f * neckPitch * _root->local.scale;
-
         const float playerAdjustZ = (4 * g_config.getPlayerBodyOffsetUp() - g_config.getPlayerHMDOffsetUp() + g_config.getPlayerLegSlackAdjustOffset())
-            * comfortSneakAdjustZ + zOffsetByNeckPitch;
+            * comfortSneakAdjustZ;
 
+        // The rotated HMD lever arm has already been removed from the pivot.
+        // Do not add the former pitch-dependent position approximations here.
         const auto neckPos = _curentPosition + RE::NiPoint3(
-            -_forwardDir.x * (g_config.getPlayerBodyOffsetForward() / 2 - xOffsetByNeckPitch),
-            -_forwardDir.y * (g_config.getPlayerBodyOffsetForward() / 2 - xOffsetByNeckPitch),
+            -_forwardDir.x * g_config.getPlayerBodyOffsetForward() / 2,
+            -_forwardDir.y * g_config.getPlayerBodyOffsetForward() / 2,
             -playerAdjustZ);
 
-        _torsoLen = MatrixUtils::vec3Len(neck->world.translate - com->world.translate);
+        _torsoLen = MatrixUtils::vec3Len(_neck->world.translate - _com->world.translate);
+        if (!std::isfinite(_torsoLen) || _torsoLen <= kVectorEpsilon) {
+            return;
+        }
 
-        const RE::NiPoint3 hmdToHip = neckPos - com->world.translate;
+        const RE::NiPoint3 hmdToHip = neckPos - _com->world.translate;
         const auto dir = RE::NiPoint3(-_forwardDir.x, -_forwardDir.y, 0);
+        RE::NiPoint3 normalizedDir;
+        if (!tryNormalize(dir, normalizedDir)) {
+            return;
+        }
 
         const float dist = tanf(bodyPitch) * MatrixUtils::vec3Len(hmdToHip);
-        RE::NiPoint3 tmpHipPos = com->world.translate + dir * (dist / MatrixUtils::vec3Len(dir));
-        tmpHipPos.z = com->world.translate.z;
+        if (!std::isfinite(dist)) {
+            return;
+        }
+        RE::NiPoint3 tmpHipPos = _com->world.translate + normalizedDir * dist;
+        tmpHipPos.z = _com->world.translate.z;
 
         const RE::NiPoint3 hmdToNewHip = tmpHipPos - neckPos;
-        const RE::NiPoint3 newHipPos = neckPos + hmdToNewHip * (_torsoLen / MatrixUtils::vec3Len(hmdToNewHip));
+        RE::NiPoint3 normalizedHmdToNewHip;
+        if (!tryNormalize(hmdToNewHip, normalizedHmdToNewHip)) {
+            return;
+        }
+        const RE::NiPoint3 newHipPos = neckPos + normalizedHmdToNewHip * _torsoLen;
 
-        const RE::NiPoint3 newPos = com->local.translate + _root->world.rotate * (newHipPos - com->world.translate);
-        com->local.translate.y += newPos.y + g_config.getPlayerBodyOffsetForward() - 2 * xOffsetByNeckPitch;
-        com->local.translate.z = _inPowerArmor ? newPos.z / 1.7f : newPos.z / 1.5f;
+        const RE::NiPoint3 newPos = _com->local.translate + _root->world.rotate * (newHipPos - _com->world.translate);
+        if (!isFinite(newPos)) {
+            return;
+        }
+        _com->local.translate.y += newPos.y + g_config.getPlayerBodyOffsetForward();
+        _com->local.translate.z = _inPowerArmor ? newPos.z / 1.7f : newPos.z / 1.5f;
 
         // ???
         _root->parent->world.translate.z -= g_config.getPlayerBodyOffsetUp() + getAdjustedPlayerHMDOffset();
 
-        const RE::NiMatrix3 mat = MatrixUtils::getMatrixFromRotateVectorVec(neckPos - tmpHipPos, hmdToHip) * spine->parent->world.rotate.Transpose();
-        spine->local.rotate = spine->world.rotate * mat;
+        if (MatrixUtils::vec3Len(neckPos - tmpHipPos) > kVectorEpsilon &&
+            MatrixUtils::vec3Len(hmdToHip) > kVectorEpsilon) {
+            const RE::NiMatrix3 mat = MatrixUtils::getMatrixFromRotateVectorVec(neckPos - tmpHipPos, hmdToHip) * _spine1->parent->world.rotate.Transpose();
+            if (isFinite(mat)) {
+                _spine1->local.rotate = _spine1->world.rotate * mat;
+            }
+        }
     }
 
     void Skeleton::setKneePos()
