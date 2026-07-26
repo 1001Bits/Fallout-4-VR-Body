@@ -6,15 +6,15 @@ using namespace common;
 
 namespace frik
 {
-    void SelfieHandler::onFrameUpdate() const
+    void SelfieHandler::onFrameUpdate(const RE::NiPoint3& hmdPivot) const
     {
-        basicSelfie();
+        basicSelfie(hmdPivot);
     }
 
     /**
      * Projects the 3rd person body out in front of the player by offset amount
      */
-    void SelfieHandler::basicSelfie() const
+    void SelfieHandler::basicSelfie(const RE::NiPoint3& hmdPivot) const
     {
         if (!g_frik.isSelfieModeOn()) {
             return;
@@ -32,7 +32,7 @@ namespace frik
         const auto bodyDir = RE::NiPoint3(0, 1, 0);
 
         root->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(back, bodyDir) * body->world.rotate.Transpose();
-        root->local.translate = body->world.translate - f4vr::getCameraPosition();
+        root->local.translate = body->world.translate - hmdPivot;
         root->local.translate.y += g_config.selfieOutFrontDistance;
         root->local.translate.z = z;
 

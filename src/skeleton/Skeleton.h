@@ -112,6 +112,7 @@ namespace frik
         LARGE_INTEGER _timer;
         LARGE_INTEGER _prevTime;
         float _frameTime;
+        bool _timeDiscontinuity = false;
 
         // handle switch of hands for left-handed mode
         bool _lastLeftHandedModeSwitch = false;
@@ -181,6 +182,8 @@ namespace frik
 
         RE::NiTransform _rightHandPrevFrame;
         RE::NiTransform _leftHandPrevFrame;
+        bool _rightHandDampingPrimed = false;
+        bool _leftHandDampingPrimed = false;
 
         // bones
         static std::map<std::string, std::pair<std::string, std::string>> makeFingerRelations();

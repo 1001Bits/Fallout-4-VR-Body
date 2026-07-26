@@ -47,6 +47,13 @@ namespace
         const auto player = f4vr::getPlayer();
         const auto playerCamera = f4vr::getPlayerCamera();
         if (player && playerCamera && playerCamera->cameraNode && player->unkF0 && player->unkF0->rootNode) {
+            // Keep the engine-owned player root on the render camera at this
+            // early update stage.  Skeleton::setBodyUnderHMD runs later and
+            // overrides the working root's world XY with its corrected virtual
+            // HMD pivot before updating the child skeleton.  Applying the
+            // correction here as well would double it, and changing the local
+            // engine root before main_update_player has unknown gameplay and
+            // culling side effects.
             const auto body = player->unkF0->rootNode;
             const auto& cameraPos = playerCamera->cameraNode->world.translate;
             body->local.translate.x = cameraPos.x;

@@ -45,8 +45,31 @@ namespace
 
     bool isFinite(const RE::NiTransform& transform)
     {
-        return isFinite(transform.translate) && isFinite(transform.rotate) &&
-            std::isfinite(transform.scale) && transform.scale > kVectorEpsilon;
+        if (!isFinite(transform.translate) || !isFinite(transform.rotate) ||
+            !std::isfinite(transform.scale) || transform.scale <= kVectorEpsilon) {
+            return false;
+        }
+
+        // Reject a finite but collapsed/corrupt orientation.  Thresholds are
+        // intentionally loose because engine matrices can contain small drift.
+        const RE::NiPoint3 basisX(
+            transform.rotate.entry[0][0],
+            transform.rotate.entry[0][1],
+            transform.rotate.entry[0][2]);
+        const RE::NiPoint3 basisY(
+            transform.rotate.entry[1][0],
+            transform.rotate.entry[1][1],
+            transform.rotate.entry[1][2]);
+        const RE::NiPoint3 basisZ(
+            transform.rotate.entry[2][0],
+            transform.rotate.entry[2][1],
+            transform.rotate.entry[2][2]);
+        const float lengthX = MatrixUtils::vec3Len(basisX);
+        const float lengthY = MatrixUtils::vec3Len(basisY);
+        const float lengthZ = MatrixUtils::vec3Len(basisZ);
+        return lengthX > 0.5f && lengthX < 1.5f &&
+            lengthY > 0.5f && lengthY < 1.5f &&
+            lengthZ > 0.5f && lengthZ < 1.5f;
     }
 
     bool tryNormalize(const RE::NiPoint3& input, RE::NiPoint3& output)
@@ -68,6 +91,19 @@ namespace
     bool approximatelyEqual(const RE::NiPoint3& lhs, const RE::NiPoint3& rhs)
     {
         return MatrixUtils::vec3Len(lhs - rhs) <= kVectorEpsilon;
+    }
+
+    float frameRateIndependentRetention(const float legacyRetention, const float deltaTime)
+    {
+        if (!std::isfinite(legacyRetention)) {
+            return 0.0f;
+        }
+
+        // Existing damping values were tuned as per-frame retention at 90 Hz.
+        // Exponentiation preserves that response at 90 Hz while giving the
+        // same time constant at other headset refresh rates.
+        const float retention = std::clamp(legacyRetention, 0.0f, 1.0f);
+        return std::pow(retention, std::max(deltaTime, 0.0f) * 90.0f);
     }
 
     /**
@@ -283,7 +319,7 @@ namespace frik
 
         // project body out in front of the camera for debug purposes
         logger::trace("Selfie Time");
-        _selfieHandler.onFrameUpdate();
+        _selfieHandler.onFrameUpdate(_trackedHeadPose.pivot);
 
         logger::trace("Operate hands...");
         setHandPose();
@@ -303,6 +339,7 @@ namespace frik
         QueryPerformanceFrequency(&_freqCounter);
         QueryPerformanceCounter(&_timer);
         _frameTime = static_cast<float>(_timer.QuadPart - _prevTime.QuadPart) / _freqCounter.QuadPart;
+        _timeDiscontinuity = !std::isfinite(_frameTime) || _frameTime <= 0.0f || _frameTime > 0.1f;
         if (!std::isfinite(_frameTime) || _frameTime <= 0.0f) {
             _frameTime = 1.0f / 90.0f;
         }
@@ -373,7 +410,7 @@ namespace frik
 
         const bool correctionChanged = !_hasLastPivotConfig ||
             correctionEnabled != _lastPivotCorrectionEnabled ||
-            !approximatelyEqual(configuredOffset, _lastPivotOffset);
+            (correctionEnabled && !approximatelyEqual(configuredOffset, _lastPivotOffset));
         const bool trackingReacquired = !_trackingWasValid;
         const bool positionDiscontinuity = _hasValidTrackedHeadPose &&
             MatrixUtils::vec3Len(pivot - _curentPosition) > kTrackingDiscontinuityDistance;
@@ -388,7 +425,7 @@ namespace frik
         _lastPivotOffset = configuredOffset;
         _hasLastPivotConfig = true;
 
-        if (trackingReacquired || correctionChanged || positionDiscontinuity) {
+        if (trackingReacquired || correctionChanged || positionDiscontinuity || _timeDiscontinuity) {
             if (positionDiscontinuity) {
                 logger::sample(3000, "HMD position discontinuity detected; resetting IK motion history");
             }
@@ -409,21 +446,25 @@ namespace frik
         _delayFrame = 0;
         _stepDir = _forwardDir;
 
-        if (_rightHand && isFinite(_rightHand->world)) {
-            _rightHandPrevFrame = _rightHand->world;
-        }
-        if (_leftHand && isFinite(_leftHand->world)) {
-            _leftHandPrevFrame = _leftHand->world;
-        }
+        // The damped objects are weapon offset nodes, not the first-person
+        // hand bones cached above.  Prime from the actual node on its next use.
+        _rightHandDampingPrimed = false;
+        _leftHandDampingPrimed = false;
     }
 
     bool Skeleton::hasRequiredNodes() const
     {
+        const bool armsAvailable =
+            _leftArm.shoulder && _leftArm.upper && _leftArm.forearm1 && _leftArm.hand &&
+            _rightArm.shoulder && _rightArm.upper && _rightArm.forearm1 && _rightArm.hand;
         return _root && _root->parent && _playerNodes &&
             _playerNodes->playerworldnode &&
+            _playerNodes->UprightHmdNode &&
             _playerNodes->primaryWandNode && _playerNodes->SecondaryWandNode &&
+            _playerNodes->primaryWeaponOffsetNOde && _playerNodes->SecondaryMeleeWeaponOffsetNode2 &&
+            _playerNodes->WeaponLeftNode &&
             _head && _spine && _chest && _com && _neck && _spine1 &&
-            _rightHand && _leftHand;
+            _rightHand && _leftHand && armsAvailable;
     }
 
     /**
@@ -562,9 +603,11 @@ namespace frik
             parentScale = _playerNodes->playerworldnode->world.scale;
         }
 
-        const float pivotCorrectionZ =
-            (_trackedHeadPose.pivot.z - _trackedHeadPose.raw.translate.z) / parentScale;
-        return _playerNodes->UprightHmdNode->local.translate.z + pivotCorrectionZ;
+        const RE::NiPoint3 pivotCorrectionWorld =
+            _trackedHeadPose.pivot - _trackedHeadPose.raw.translate;
+        const RE::NiPoint3 pivotCorrectionLocal =
+            _playerNodes->playerworldnode->world.rotate * (pivotCorrectionWorld / parentScale);
+        return _playerNodes->UprightHmdNode->local.translate.z + pivotCorrectionLocal.z;
     }
 
     /**
@@ -628,14 +671,23 @@ namespace frik
         // comfort sneak changes the height of the avatar without the player changing height in the real world, need to adjust for it
         const float comfortSneakAdjustZ = isComfortSneakMode() && isPlayerSneaking() ? _comfortSneakCameraOffsetAdjustment * _comfortSneakCameraOffsetAdjustment : 1.0f;
 
+        // Preserve the old approximation only when pivot correction is
+        // explicitly disabled.  With correction enabled, the full rotated
+        // three-dimensional lever arm replaces both pitch-only offsets.
+        const float legacyForwardOffsetByPitch = !_lastPivotCorrectionEnabled
+            ? fmaxf(0, (isComfortSneakHackEnabled() ? 2.0f : 5.0f) * fabs(neckPitch))
+            : 0.0f;
+        const float legacyVerticalOffsetByPitch = !_lastPivotCorrectionEnabled
+            ? 6.0f * neckPitch
+            : 0.0f;
         const float playerAdjustZ = (4 * g_config.getPlayerBodyOffsetUp() - g_config.getPlayerHMDOffsetUp() + g_config.getPlayerLegSlackAdjustOffset())
-            * comfortSneakAdjustZ;
+            * comfortSneakAdjustZ + legacyVerticalOffsetByPitch;
 
-        // The rotated HMD lever arm has already been removed from the pivot.
-        // Do not add the former pitch-dependent position approximations here.
+        // In corrected mode the rotated HMD lever arm has already been removed
+        // from the pivot, so the former pitch approximations are both zero.
         const auto neckPos = _curentPosition + RE::NiPoint3(
-            -_forwardDir.x * g_config.getPlayerBodyOffsetForward() / 2,
-            -_forwardDir.y * g_config.getPlayerBodyOffsetForward() / 2,
+            -_forwardDir.x * (g_config.getPlayerBodyOffsetForward() / 2 - legacyForwardOffsetByPitch),
+            -_forwardDir.y * (g_config.getPlayerBodyOffsetForward() / 2 - legacyForwardOffsetByPitch),
             -playerAdjustZ);
 
         _torsoLen = MatrixUtils::vec3Len(_neck->world.translate - _com->world.translate);
@@ -668,7 +720,7 @@ namespace frik
         if (!isFinite(newPos)) {
             return;
         }
-        _com->local.translate.y += newPos.y + g_config.getPlayerBodyOffsetForward();
+        _com->local.translate.y += newPos.y + g_config.getPlayerBodyOffsetForward() - 2 * legacyForwardOffsetByPitch;
         _com->local.translate.z = _inPowerArmor ? newPos.z / 1.7f : newPos.z / 1.5f;
 
         // ???
@@ -1590,45 +1642,69 @@ namespace frik
 
     void Skeleton::dampenHand(RE::NiNode* node, const bool isLeft)
     {
-        if (!g_config.dampenHands) {
-            if (g_frik.isMainConfigurationModeActive()) {
-                // small hack to prevent jarring effect when dampen is enabled for the first time via main config
-                if (isLeft) {
-                    _leftHandPrevFrame = node->world;
-                } else {
-                    _rightHandPrevFrame = node->world;
-                }
+        if (!node || !isFinite(node->world)) {
+            if (isLeft) {
+                _leftHandDampingPrimed = false;
+            } else {
+                _rightHandDampingPrimed = false;
             }
+            return;
+        }
+
+        auto& prevFrame = isLeft ? _leftHandPrevFrame : _rightHandPrevFrame;
+        auto& dampingPrimed = isLeft ? _leftHandDampingPrimed : _rightHandDampingPrimed;
+
+        if (!g_config.dampenHands) {
+            // Keep history current so enabling damping cannot interpolate from
+            // a stale transform.
+            prevFrame = node->world;
+            dampingPrimed = true;
             return;
         }
 
         const bool isInScopeMenu = g_frik.isInScopeMenu();
         if (isInScopeMenu && !g_config.dampenHandsInVanillaScope) {
+            prevFrame = node->world;
+            dampingPrimed = true;
             return;
         }
 
-        // Get the previous frame transform
-        const RE::NiTransform& prevFrame = isLeft ? _leftHandPrevFrame : _rightHandPrevFrame;
+        if (!dampingPrimed || !isFinite(prevFrame)) {
+            prevFrame = node->world;
+            dampingPrimed = true;
+            return;
+        }
+
+        const RE::NiTransform currentFrame = node->world;
+        const float rotationRetention = frameRateIndependentRetention(
+            isInScopeMenu ? g_config.dampenHandsRotationInVanillaScope : g_config.dampenHandsRotation,
+            _frameTime);
+        const float translationRetention = frameRateIndependentRetention(
+            isInScopeMenu ? g_config.dampenHandsTranslationInVanillaScope : g_config.dampenHandsTranslation,
+            _frameTime);
 
         // Spherical interpolation between previous frame and current frame for the world rotation matrix
         Quaternion rq, rt;
         rq.fromMatrix(prevFrame.rotate);
         rt.fromMatrix(node->world.rotate);
-        rq.slerp(1 - (isInScopeMenu ? g_config.dampenHandsRotationInVanillaScope : g_config.dampenHandsRotation), rt);
+        rq.slerp(1.0f - rotationRetention, rt);
         node->world.rotate = rq.getMatrix();
+        if (!isFinite(node->world.rotate)) {
+            node->world.rotate = currentFrame.rotate;
+        }
 
         // Linear interpolation between the position from the previous frame to current frame
-        const RE::NiPoint3 dir = _curentPosition - _lastPosition; // Offset the player movement from this interpolation
-        RE::NiPoint3 deltaPos = node->world.translate - prevFrame.translate - dir; // Add in player velocity
-        deltaPos *= isInScopeMenu ? g_config.dampenHandsTranslationInVanillaScope : g_config.dampenHandsTranslation;
+        // Compensate using corrected anatomical-pivot movement, so rotating the
+        // HMD around the neck does not masquerade as player translation.
+        const RE::NiPoint3 dir = _curentPosition - _lastPosition;
+        RE::NiPoint3 deltaPos = node->world.translate - prevFrame.translate - dir;
+        deltaPos *= translationRetention;
         node->world.translate -= deltaPos;
-
-        // Update the previous frame transform
-        if (isLeft) {
-            _leftHandPrevFrame = node->world;
-        } else {
-            _rightHandPrevFrame = node->world;
+        if (!isFinite(node->world.translate)) {
+            node->world.translate = currentFrame.translate;
         }
+
+        prevFrame = node->world;
 
         updateDown(node, false);
     }
