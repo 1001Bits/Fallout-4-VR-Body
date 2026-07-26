@@ -721,29 +721,75 @@ namespace frik
         _turnAccumulator.reset();
     }
 
-    bool Skeleton::canUseProceduralLegs() const
+    /**
+     * Whether the procedural gait should run this frame.
+     *
+     * This gate must fail OPEN. 0.77.12 had no gating at all and worked; anything
+     * here that misfires disables the legs entirely, and because
+     * restoreNodesToDefault() also skips leg bones while disabled, they simply stop
+     * moving. The reason is logged whenever it changes so a bad condition is
+     * identifiable from FRIK.log rather than by guesswork.
+     */
+    bool Skeleton::canUseProceduralLegs()
     {
         const auto player = RE::PlayerCharacter::GetSingleton();
+        const char* reason = nullptr;
+
         const bool legNodesAvailable = _leftLeg.hip && _leftLeg.knee && _leftLeg.foot && _rightLeg.hip && _rightLeg.knee && _rightLeg.foot;
-        if (!player || !legNodesAvailable || g_config.isPlayingSeated || g_frik.isPauseMenuOpen()) {
-            return false;
+        if (!player) {
+            reason = "no player";
+        } else if (!legNodesAvailable) {
+            reason = "leg bones missing";
+        } else if (g_config.isPlayingSeated) {
+            reason = "seated mode";
+        } else if (g_frik.isPauseMenuOpen()) {
+            reason = "pause menu";
+        } else if (isJumpingOrInAir()) {
+            reason = "jumping or in air";
+        } else if (isSwimming(player)) {
+            reason = "swimming";
+        } else if (isUnderwater(player)) {
+            reason = "underwater";
+        } else if (player->IsDead(false)) {
+            reason = "dead";
+        } else if (player->DoGetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal) {
+            reason = "sitting or sleeping";
+        } else {
+            // Only veto camera states where a procedural gait is clearly wrong. The
+            // previous code allowlisted FirstPerson/IronSights and failed closed on
+            // everything else, so any state Fallout 4 VR reports outside that pair
+            // killed the legs permanently. Unknown states are now allowed through.
+            const auto playerCamera = getPlayerCamera();
+            if (playerCamera && playerCamera->cameraState) {
+                switch (playerCamera->cameraState->stateID) {
+                case F4SEVR::PlayerCamera::kCameraState_ThirdPerson1:
+                case F4SEVR::PlayerCamera::kCameraState_ThirdPerson2:
+                case F4SEVR::PlayerCamera::kCameraState_AutoVanity:
+                case F4SEVR::PlayerCamera::kCameraState_Free:
+                case F4SEVR::PlayerCamera::kCameraState_TweenMenu:
+                case F4SEVR::PlayerCamera::kCameraState_Furniture:
+                case F4SEVR::PlayerCamera::kCameraState_Horse:
+                case F4SEVR::PlayerCamera::kCameraState_Bleedout:
+                case F4SEVR::PlayerCamera::kCameraState_Dialogue:
+                case F4SEVR::PlayerCamera::kCameraState_VATS:
+                    reason = "camera state";
+                    break;
+                default:
+                    break;
+                }
+            }
         }
 
-        if (player->IsDead(false) || static_cast<RE::LIFE_STATE>(player->lifeState) != RE::LIFE_STATE::kAlive || player->knockState != 0 ||
-            player->DoGetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal || isJumpingOrInAir() || isSwimming(player) || isUnderwater(player)) {
-            return false;
+        // Report only on change, so this is usable at the default info log level.
+        if (reason != _lastLegGateReason) {
+            if (reason) {
+                logger::info("Procedural legs disabled: {}", reason);
+            } else {
+                logger::info("Procedural legs enabled");
+            }
+            _lastLegGateReason = reason;
         }
-
-        const auto playerCamera = getPlayerCamera();
-        if (!playerCamera || !playerCamera->cameraState) {
-            return false;
-        }
-
-        // Fail closed during scripted/menu/third-person camera transitions.
-        // First-person and iron-sights are the only locomotion-capable VR
-        // states in which procedural foot placement is safe.
-        const auto cameraState = playerCamera->cameraState->stateID;
-        return cameraState == F4SEVR::PlayerCamera::kCameraState_FirstPerson || cameraState == F4SEVR::PlayerCamera::kCameraState_IronSights;
+        return reason == nullptr;
     }
 
     bool Skeleton::hasRequiredNodes() const
@@ -1910,16 +1956,40 @@ namespace frik
         const float handPositionResidual = MatrixUtils::vec3Len(arm.hand->world.translate - handPos);
         const float elbowPositionResidual = MatrixUtils::vec3Len(arm.forearm1->world.translate - elbowWorld);
         const float handRotationResidual = maximumMatrixDifference(arm.hand->world.rotate, handRot);
-        const bool worldPoseValid = isFinite(arm.shoulder->world) && isNearlyOrthonormal(arm.shoulder->world.rotate) && isFinite(arm.upper->world) &&
+
+        const bool geometryValid = isFinite(arm.shoulder->world) && isNearlyOrthonormal(arm.shoulder->world.rotate) && isFinite(arm.upper->world) &&
             isNearlyOrthonormal(arm.upper->world.rotate) && isFinite(arm.forearm1->world) && isNearlyOrthonormal(arm.forearm1->world.rotate) &&
             (!arm.forearm2 || (isFinite(arm.forearm2->world) && isNearlyOrthonormal(arm.forearm2->world.rotate))) &&
             (!arm.forearm3 || (isFinite(arm.forearm3->world) && isNearlyOrthonormal(arm.forearm3->world.rotate))) && isFinite(arm.hand->world) &&
-            isNearlyOrthonormal(arm.hand->world.rotate) && std::isfinite(handPositionResidual) && handPositionResidual <= 1.0f && std::isfinite(elbowPositionResidual) &&
-            elbowPositionResidual <= 0.25f && std::isfinite(handRotationResidual) && handRotationResidual <= 0.03f;
-        if (!worldPoseValid) {
-            logger::sample("Rejected {} arm IK pose: world validation failed (hand pos {:.3f}, elbow pos {:.3f}, hand rot {:.3f})", isLeft ? "left" : "right", handPositionResidual,
-                elbowPositionResidual, handRotationResidual);
+            isNearlyOrthonormal(arm.hand->world.rotate);
+
+        // These residuals exist to catch a pose that did not track the controller at
+        // all, not to demand analytic precision from a chain that also applies
+        // forearm-ratio and twist-bone scaling. The previous bounds (elbow within
+        // 0.25 units, ~3.5mm) were far tighter than the chain can reproduce, and a
+        // failure here rolls the whole arm back to its rest pose - which reads in VR
+        // as the arm snapping. Only the hand target is worth rejecting over, scaled
+        // to the arm rather than a fixed unit count; the elbow and wrist are cosmetic
+        // and are reported instead.
+        const float handResidualLimit = (std::max)(restArmLength * 0.1f, 2.0f);
+        const bool handTracked = std::isfinite(handPositionResidual) && handPositionResidual <= handResidualLimit;
+        if (!geometryValid || !handTracked) {
+            logger::sample("Rejected {} arm IK pose: {} (hand pos {:.3f}/{:.3f}, elbow pos {:.3f}, hand rot {:.3f})", isLeft ? "left" : "right",
+                geometryValid ? "hand missed target" : "invalid world transform", handPositionResidual, handResidualLimit, elbowPositionResidual, handRotationResidual);
             return;
+        }
+
+        // Diagnostic for the arm visibly snapping: the elbow pole swinging hard in a
+        // single frame is exactly that symptom. Pole smoothing spreads a hemisphere
+        // flip over several frames, so a per-frame threshold well under 180 degrees
+        // is what catches it. Reported with the inputs that would explain it.
+        if (continuity.hasPole && candidateContinuity.hasPole) {
+            const float poleDot = std::clamp(ik::dot(continuity.pole, candidateContinuity.pole), -1.0f, 1.0f);
+            const float poleSwingDegrees = MatrixUtils::radsToDegrees(std::acos(poleDot));
+            if (std::isfinite(poleSwingDegrees) && poleSwingDegrees > 12.0f) {
+                logger::sample(500, "[IKDIAG] {} elbow swing {:.1f}deg (reach {:.2f}, wrist {:.1f}deg, stretched {}, handResidual {:.2f})", isLeft ? "left" : "right",
+                    poleSwingDegrees, solve.reachRatio, MatrixUtils::radsToDegrees(solve.wristCorrection), solve.stretched ? 1 : 0, handPositionResidual);
+            }
         }
 
         continuity = candidateContinuity;

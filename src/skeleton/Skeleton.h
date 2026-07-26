@@ -80,7 +80,9 @@ namespace frik
         void resetMotionState();
         void resetWalkingState();
         bool hasRequiredNodes() const;
-        bool canUseProceduralLegs() const;
+        bool canUseProceduralLegs();
+        // Last reported gating reason, so the log fires on change rather than per frame.
+        const char* _lastLegGateReason = "";
         void restoreNodesToDefault();
         void setupHead(float neckYaw, float neckPitch) const;
         void setBodyUnderHMD(float rootYaw);

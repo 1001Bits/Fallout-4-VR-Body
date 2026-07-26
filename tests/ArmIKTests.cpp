@@ -205,6 +205,70 @@ int main()
         }
     }
 
+    // Elbow continuity: sweeping the hand smoothly must move the pole smoothly. A
+    // hemisphere flip here is what shows up in VR as the arm snapping left and right.
+    {
+        constexpr float pi = std::numbers::pi_v<float>;
+        for (const float elevation : { -0.9f, -0.6f, -0.3f, 0.0f, 0.3f, 0.6f, 0.9f }) {
+            for (const float radius : { 12.0f, 20.0f, 28.0f }) {
+                ArmContinuityState sweepState;
+                Vec3 previousPole{};
+                bool havePrevious = false;
+                for (int step = 0; step <= 360; ++step) {
+                    const float azimuth = static_cast<float>(step) * pi / 180.0f;
+                    const float horizontal = std::sqrt((std::max)(1.0f - elevation * elevation, 0.0f));
+                    auto sweepInput = makeInput();
+                    sweepInput.hand = { std::cos(azimuth) * horizontal * radius, std::sin(azimuth) * horizontal * radius, elevation * radius };
+                    const auto solved = solveArm(sweepInput, sweepState);
+                    if (!solved.valid) {
+                        continue;
+                    }
+                    if (havePrevious) {
+                        // One degree of hand travel must not swing the pole across the
+                        // arm; 0.5 still allows a generous 60 degrees per step.
+                        require(dot(solved.pole, previousPole) > 0.5f, "elbow pole stays continuous under a smooth hand sweep");
+                    }
+                    previousPole = solved.pole;
+                    havePrevious = true;
+                }
+            }
+        }
+    }
+
+    // Rotating the wrist must also move the elbow smoothly. getWristCorrection ends
+    // in copysign(correction, angle), and `angle` comes from atan2, so its sign flips
+    // as the wrist passes +/-180 degrees. If the correction has saturated by then the
+    // pole jumps by twice the cap in one frame - the arm visibly snapping.
+    {
+        constexpr float pi = std::numbers::pi_v<float>;
+        for (const float handY : { 8.0f, 16.0f, 24.0f }) {
+            ArmContinuityState wristState;
+            Vec3 previousPole{};
+            bool havePrevious = false;
+            for (int step = 0; step <= 720; ++step) {
+                const float roll = static_cast<float>(step) * 0.5f * pi / 180.0f;
+                auto wristInput = makeInput();
+                wristInput.hand = { 6.0f, handY, 2.0f };
+                // Spin the tracked hand axes about the shoulder-to-hand line.
+                const auto axis = safeNormalize(wristInput.hand - wristInput.shoulder);
+                const Vec3 a{ 0.0f, 0.0f, 1.0f };
+                const auto u = safeNormalize(cross(axis, a));
+                const auto v = cross(axis, u);
+                wristInput.handBack = u * std::cos(roll) + v * std::sin(roll);
+                wristInput.handSide = u * std::cos(roll + pi * 0.5f) + v * std::sin(roll + pi * 0.5f);
+                const auto solved = solveArm(wristInput, wristState);
+                if (!solved.valid) {
+                    continue;
+                }
+                if (havePrevious) {
+                    require(dot(solved.pole, previousPole) > 0.5f, "elbow pole stays continuous as the wrist rolls through +/-180 degrees");
+                }
+                previousPole = solved.pole;
+                havePrevious = true;
+            }
+        }
+    }
+
     // Exponential smoothing composes consistently across common VR refresh rates.
     constexpr std::array refreshRates{ 45, 72, 90, 120 };
     const float reference = smoothForOneSecond(refreshRates.front());
