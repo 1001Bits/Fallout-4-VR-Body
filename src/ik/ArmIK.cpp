@@ -18,25 +18,13 @@ namespace
     constexpr float kPoleTimeConstant = 0.045f;
     constexpr float kSingularPoleTimeConstant = 0.085f;
 
-    float degreesToRadians(const float degrees)
-    {
-        return degrees * std::numbers::pi_v<float> / 180.0f;
-    }
+    float degreesToRadians(const float degrees) { return degrees * std::numbers::pi_v<float> / 180.0f; }
 
-    float clamp01(const float value)
-    {
-        return std::clamp(value, 0.0f, 1.0f);
-    }
+    float clamp01(const float value) { return std::clamp(value, 0.0f, 1.0f); }
 
-    frik::ik::Vec3 projectOnPlane(const frik::ik::Vec3& value, const frik::ik::Vec3& normal)
-    {
-        return value - normal * frik::ik::dot(value, normal);
-    }
+    frik::ik::Vec3 projectOnPlane(const frik::ik::Vec3& value, const frik::ik::Vec3& normal) { return value - normal * frik::ik::dot(value, normal); }
 
-    frik::ik::Vec3 lerp(const frik::ik::Vec3& from, const frik::ik::Vec3& to, const float amount)
-    {
-        return from + (to - from) * clamp01(amount);
-    }
+    frik::ik::Vec3 lerp(const frik::ik::Vec3& from, const frik::ik::Vec3& to, const float amount) { return from + (to - from) * clamp01(amount); }
 
     frik::ik::Vec3 rotateAroundAxis(const frik::ik::Vec3& value, const frik::ik::Vec3& axis, const float angle)
     {
@@ -58,7 +46,7 @@ namespace
         // is dimensionless: shoulder-to-hand position divided by arm length.
         float angle = kElbowAngleOffset - 60.0f * localHand.z;
 
-        const float forwardDistance = std::max(0.6f - localHand.y, 0.0f);
+        const float forwardDistance = (std::max)(0.6f - localHand.y, 0.0f);
         if (localHand.z > 0.0f) {
             angle += 260.0f * forwardDistance * localHand.z;
         } else {
@@ -67,14 +55,11 @@ namespace
 
         // bodyOutward is positive away from the torso; only crossing inward
         // should activate this term.
-        angle -= 50.0f * std::max(-localHand.x + 0.1f, 0.0f);
+        angle -= 50.0f * (std::max)(-localHand.x + 0.1f, 0.0f);
         return std::clamp(angle, kMinimumElbowAngle, kMaximumElbowAngle);
     }
 
-    float getWristCorrection(
-        const frik::ik::Vec3& reachAxis,
-        const frik::ik::Vec3& currentHandToElbow,
-        const frik::ik::Vec3& trackedHandBack,
+    float getWristCorrection(const frik::ik::Vec3& reachAxis, const frik::ik::Vec3& currentHandToElbow, const frik::ik::Vec3& trackedHandBack,
         const frik::ik::Vec3& trackedHandSide)
     {
         const auto current = projectOnPlane(currentHandToElbow, reachAxis);
@@ -89,7 +74,10 @@ namespace
 
         const auto currentDirection = frik::ik::safeNormalize(current);
         auto sidePole = frik::ik::safeNormalize(frik::ik::cross(reachAxis, sideProjection), currentDirection);
-        if (frik::ik::dot(sidePole, currentDirection) < 0.0f) {
+        // The tracked longitudinal axis, when usable, defines the hemisphere
+        // of the side-axis-derived pole. Do not flip it from the provisional
+        // elbow direction, which changes sign as the elbow crosses 90 degrees.
+        if (backWeight > kEpsilon && frik::ik::dot(sidePole, backProjection) < 0.0f) {
             sidePole = sidePole * -1.0f;
         }
 
@@ -117,56 +105,28 @@ namespace
         // dead zone. Cap the swivel contribution so hand orientation remains
         // a late, soft cue rather than taking control of the elbow.
         const float scale = degreesToRadians(135.0f);
-        const float correction = std::min(excess * excess / scale, degreesToRadians(kMaximumWristCorrection));
+        const float correction = (std::min)(excess * excess / scale, degreesToRadians(kMaximumWristCorrection));
         return std::copysign(correction, angle);
     }
 }
 
 namespace frik::ik
 {
-    Vec3 Vec3::operator+(const Vec3& rhs) const
-    {
-        return { x + rhs.x, y + rhs.y, z + rhs.z };
-    }
+    Vec3 Vec3::operator+(const Vec3& rhs) const { return { x + rhs.x, y + rhs.y, z + rhs.z }; }
 
-    Vec3 Vec3::operator-(const Vec3& rhs) const
-    {
-        return { x - rhs.x, y - rhs.y, z - rhs.z };
-    }
+    Vec3 Vec3::operator-(const Vec3& rhs) const { return { x - rhs.x, y - rhs.y, z - rhs.z }; }
 
-    Vec3 Vec3::operator*(const float scalar) const
-    {
-        return { x * scalar, y * scalar, z * scalar };
-    }
+    Vec3 Vec3::operator*(const float scalar) const { return { x * scalar, y * scalar, z * scalar }; }
 
-    Vec3 Vec3::operator/(const float scalar) const
-    {
-        return std::abs(scalar) > kEpsilon ? *this * (1.0f / scalar) : Vec3{};
-    }
+    Vec3 Vec3::operator/(const float scalar) const { return std::abs(scalar) > kEpsilon ? *this * (1.0f / scalar) : Vec3{}; }
 
-    bool isFinite(const float value)
-    {
-        return std::isfinite(value);
-    }
+    bool isFinite(const float value) { return std::isfinite(value); }
 
-    bool isFinite(const Vec3& value)
-    {
-        return isFinite(value.x) && isFinite(value.y) && isFinite(value.z);
-    }
+    bool isFinite(const Vec3& value) { return isFinite(value.x) && isFinite(value.y) && isFinite(value.z); }
 
-    float dot(const Vec3& lhs, const Vec3& rhs)
-    {
-        return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
-    }
+    float dot(const Vec3& lhs, const Vec3& rhs) { return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z; }
 
-    Vec3 cross(const Vec3& lhs, const Vec3& rhs)
-    {
-        return {
-            lhs.y * rhs.z - lhs.z * rhs.y,
-            lhs.z * rhs.x - lhs.x * rhs.z,
-            lhs.x * rhs.y - lhs.y * rhs.x
-        };
-    }
+    Vec3 cross(const Vec3& lhs, const Vec3& rhs) { return { lhs.y * rhs.z - lhs.z * rhs.y, lhs.z * rhs.x - lhs.x * rhs.z, lhs.x * rhs.y - lhs.y * rhs.x }; }
 
     float length(const Vec3& value)
     {
@@ -185,10 +145,7 @@ namespace frik::ik
         return fallbackLength > kEpsilon ? fallback / fallbackLength : Vec3{ 1.0f, 0.0f, 0.0f };
     }
 
-    float safeAcos(const float value)
-    {
-        return std::acos(std::clamp(value, -1.0f, 1.0f));
-    }
+    float safeAcos(const float value) { return std::acos(std::clamp(value, -1.0f, 1.0f)); }
 
     float smoothingAlpha(const float deltaTime, const float timeConstant)
     {
@@ -198,7 +155,7 @@ namespace frik::ik
         if (!isFinite(timeConstant) || timeConstant <= kEpsilon) {
             return 1.0f;
         }
-        return 1.0f - std::exp(-std::min(deltaTime, 0.1f) / timeConstant);
+        return 1.0f - std::exp(-(std::min)(deltaTime, 0.1f) / timeConstant);
     }
 
     float smoothStep(const float edge0, const float edge1, const float value)
@@ -213,16 +170,15 @@ namespace frik::ik
     ArmSolveResult solveArm(const ArmSolveInput& input, ArmContinuityState& continuity)
     {
         ArmSolveResult result;
-        if (!isFinite(input.shoulder) || !isFinite(input.hand) ||
-            !isFinite(input.upperLength) || !isFinite(input.lowerLength) ||
-            input.upperLength <= kEpsilon || input.lowerLength <= kEpsilon) {
+        if (!isFinite(input.shoulder) || !isFinite(input.hand) || !isFinite(input.upperLength) || !isFinite(input.lowerLength) || input.upperLength <= kEpsilon ||
+            input.lowerLength <= kEpsilon) {
             return result;
         }
 
         const Vec3 shoulderToHand = input.hand - input.shoulder;
         const float targetDistance = length(shoulderToHand);
         const float restLength = input.upperLength + input.lowerLength;
-        if (targetDistance <= kEpsilon || targetDistance > restLength * 2.25f) {
+        if (targetDistance <= kEpsilon || targetDistance > restLength * (1.0f + kMaximumArmStretch)) {
             return result;
         }
 
@@ -235,27 +191,32 @@ namespace frik::ik
         result.lowerLength = input.lowerLength;
         result.reachRatio = targetDistance / restLength;
 
-        // Use a small soft extension near full reach, but never stretch the
-        // avatar to an arbitrary tracking target. The tracked/controller hand
-        // remains untouched; only the cosmetic arm chain is reach-limited.
+        // A valid solve always reaches the tracked hand exactly. A small,
+        // bounded proportional extension handles calibration noise near full
+        // reach; larger overreach is rejected so the runtime can retain the
+        // game's tracked-hand pose instead of creating a wrist gap.
         if (targetDistance >= restLength - kEpsilon) {
-            const float stretchWeight = smoothStep(1.0f, 1.08f, result.reachRatio);
-            const float scale = 1.0f + kMaximumArmStretch * stretchWeight;
+            const float scale = (targetDistance + 0.01f) / restLength;
+            if (scale > 1.0f + kMaximumArmStretch) {
+                return result;
+            }
             result.upperLength *= scale;
             result.lowerLength *= scale;
             result.stretched = scale > 1.0f + kEpsilon;
         } else if (targetDistance <= std::abs(result.upperLength - result.lowerLength) + kEpsilon) {
-            // Equal segments remain solvable when the hand is very close to the
-            // shoulder and avoid invalid cosine-rule triangles.
-            result.upperLength = result.lowerLength = restLength * 0.5f;
+            // Preserve the segment ratio until the target enters the rigid
+            // chain's inner unreachable radius, then continuously shorten only
+            // the longer segment enough to keep the tracked endpoint exact.
+            const float innerDifference = (std::max)(targetDistance - 0.01f, kEpsilon);
+            if (result.upperLength > result.lowerLength) {
+                result.upperLength = result.lowerLength + innerDifference;
+            } else {
+                result.lowerLength = result.upperLength + innerDifference;
+            }
         }
-        result.solvedReach = std::min(targetDistance, result.upperLength + result.lowerLength - 0.01f);
+        result.solvedReach = targetDistance;
 
-        const Vec3 localHand = {
-            dot(shoulderToHand, outward) / restLength,
-            dot(shoulderToHand, forward) / restLength,
-            dot(shoulderToHand, up) / restLength
-        };
+        const Vec3 localHand = { dot(shoulderToHand, outward) / restLength, dot(shoulderToHand, forward) / restLength, dot(shoulderToHand, up) / restLength };
 
         Vec3 previousPole = continuity.hasPole ? projectOnPlane(continuity.pole, reachAxis) : Vec3{};
         const Vec3 fixedDirection = safeNormalize(outward * 0.133f - up * 0.443f - forward * 0.886f);
@@ -268,7 +229,20 @@ namespace frik::ik
         baseUp = safeNormalize(baseUp, fixedPole);
 
         Vec3 swivelTangent = safeNormalize(cross(reachAxis, baseUp), fixedPole);
-        if (dot(swivelTangent, outward) < 0.0f) {
+
+        // A lateral T-pose makes the tangent orthogonal to bodyOutward, so
+        // handedness cannot be chosen from that dot product. Orient the basis
+        // toward the projected anatomical fixed/back direction instead. Near
+        // its degeneracy, prefer the previous pole and finally body-back.
+        Vec3 tangentHint = projectOnPlane(fixedPole, reachAxis);
+        tangentHint = projectOnPlane(tangentHint, baseUp);
+        if (length(tangentHint) <= kEpsilon && continuity.hasPole) {
+            tangentHint = projectOnPlane(projectOnPlane(continuity.pole, reachAxis), baseUp);
+        }
+        if (length(tangentHint) <= kEpsilon) {
+            tangentHint = projectOnPlane(projectOnPlane(forward * -1.0f, reachAxis), baseUp);
+        }
+        if (length(tangentHint) > kEpsilon && dot(swivelTangent, tangentHint) < 0.0f) {
             swivelTangent = swivelTangent * -1.0f;
         }
 
@@ -281,7 +255,7 @@ namespace frik::ik
         const float verticalDistance = std::sqrt(localHand.x * localHand.x + localHand.y * localHand.y);
         const float verticalWeight = 1.0f - smoothStep(0.0f, kVerticalAxisCorrectionStart, verticalDistance);
         const float behindWeight = smoothStep(0.0f, kBehindShoulderCorrectionRange, -localHand.y);
-        const float singularWeight = std::max(verticalWeight, behindWeight);
+        const float singularWeight = (std::max)(verticalWeight, behindWeight);
 
         Vec3 stableReference = fixedPole;
         if (continuity.hasPole && length(previousPole) > kEpsilon) {
@@ -292,24 +266,19 @@ namespace frik::ik
         const float upperSquared = result.upperLength * result.upperLength;
         const float lowerSquared = result.lowerLength * result.lowerLength;
         const float along = (upperSquared - lowerSquared + result.solvedReach * result.solvedReach) / (2.0f * result.solvedReach);
-        const float height = std::sqrt(std::max(upperSquared - along * along, 0.0f));
+        const float height = std::sqrt((std::max)(upperSquared - along * along, 0.0f));
         Vec3 provisionalElbow = input.shoulder + reachAxis * along + desiredPole * height;
         const Vec3 solvedHand = input.shoulder + reachAxis * result.solvedReach;
 
         // Hand orientation is deliberately only a late joint-limit correction.
-        result.wristCorrection = getWristCorrection(
-            reachAxis,
-            provisionalElbow - solvedHand,
-            safeNormalize(input.handBack, provisionalElbow - solvedHand),
-            safeNormalize(input.handSide, outward));
+        result.wristCorrection =
+            getWristCorrection(reachAxis, provisionalElbow - solvedHand, safeNormalize(input.handBack, provisionalElbow - solvedHand), safeNormalize(input.handSide, outward));
         desiredPole = safeNormalize(rotateAroundAxis(desiredPole, reachAxis, result.wristCorrection), desiredPole);
 
         if (continuity.hasPole && length(previousPole) > kEpsilon) {
             previousPole = safeNormalize(previousPole, desiredPole);
             const float timeConstant = std::lerp(kPoleTimeConstant, kSingularPoleTimeConstant, singularWeight);
-            desiredPole = safeNormalize(
-                lerp(previousPole, desiredPole, smoothingAlpha(input.deltaTime, timeConstant)),
-                desiredPole);
+            desiredPole = safeNormalize(lerp(previousPole, desiredPole, smoothingAlpha(input.deltaTime, timeConstant)), desiredPole);
         }
 
         result.pole = desiredPole;

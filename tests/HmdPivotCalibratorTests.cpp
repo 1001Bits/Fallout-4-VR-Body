@@ -1,5 +1,6 @@
 #include "calibration/HmdPivotCalibrator.h"
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -44,11 +45,8 @@ namespace
 
     Vec3 transform(const Mat3& rotation, const Vec3& vector)
     {
-        return {
-            rotation(0, 0) * vector.x + rotation(0, 1) * vector.y + rotation(0, 2) * vector.z,
-            rotation(1, 0) * vector.x + rotation(1, 1) * vector.y + rotation(1, 2) * vector.z,
-            rotation(2, 0) * vector.x + rotation(2, 1) * vector.y + rotation(2, 2) * vector.z
-        };
+        return { rotation(0, 0) * vector.x + rotation(0, 1) * vector.y + rotation(0, 2) * vector.z,
+            rotation(1, 0) * vector.x + rotation(1, 1) * vector.y + rotation(1, 2) * vector.z, rotation(2, 0) * vector.x + rotation(2, 1) * vector.y + rotation(2, 2) * vector.z };
     }
 
     double distance(const Vec3& lhs, const Vec3& rhs)
@@ -67,22 +65,13 @@ namespace
         }
     }
 
-    HmdPoseSample makeSample(
-        const Vec3& pivot, const Vec3& offset, const double yaw, const double pitch, const double timestamp,
-        const Vec3& noise = {}, const double worldScale = 1.0)
+    HmdPoseSample makeSample(const Vec3& pivot, const Vec3& offset, const double yaw, const double pitch, const double timestamp, const Vec3& noise = {},
+        const double worldScale = 1.0)
     {
         const auto rotation = multiply(rotationZ(yaw), rotationX(pitch));
         const auto rotatedOffset = transform(rotation, offset);
-        return {
-            {
-                pivot.x + rotatedOffset.x * worldScale + noise.x,
-                pivot.y + rotatedOffset.y * worldScale + noise.y,
-                pivot.z + rotatedOffset.z * worldScale + noise.z
-            },
-            rotation,
-            timestamp,
-            worldScale
-        };
+        return { { pivot.x + rotatedOffset.x * worldScale + noise.x, pivot.y + rotatedOffset.y * worldScale + noise.y, pivot.z + rotatedOffset.z * worldScale + noise.z }, rotation,
+            timestamp, worldScale };
     }
 
     void recoversKnownPivotWithOutliers()
@@ -96,17 +85,12 @@ namespace
             for (int yawIndex = -5; yawIndex <= 5; ++yawIndex) {
                 const auto yaw = static_cast<double>(yawIndex) * 8.0 * std::numbers::pi / 180.0;
                 const auto pitch = static_cast<double>(pitchIndex) * 7.0 * std::numbers::pi / 180.0;
-                Vec3 noise{
-                    0.025 * std::sin(static_cast<double>(sampleIndex)),
-                    0.02 * std::cos(static_cast<double>(sampleIndex) * 0.7),
-                    0.02 * std::sin(static_cast<double>(sampleIndex) * 0.4)
-                };
+                Vec3 noise{ 0.025 * std::sin(static_cast<double>(sampleIndex)), 0.02 * std::cos(static_cast<double>(sampleIndex) * 0.7),
+                    0.02 * std::sin(static_cast<double>(sampleIndex) * 0.4) };
                 if (sampleIndex == 18 || sampleIndex == 51) {
                     noise = { 8.0, -6.0, 5.0 };
                 }
-                require(calibrator.addSample(makeSample(
-                            expectedPivot, expectedOffset, yaw, pitch, static_cast<double>(sampleIndex) * 0.05, noise))
-                        != SampleStatus::Invalid,
+                require(calibrator.addSample(makeSample(expectedPivot, expectedOffset, yaw, pitch, static_cast<double>(sampleIndex) * 0.05, noise)) != SampleStatus::Invalid,
                     "synthetic sample should be valid");
                 ++sampleIndex;
             }
@@ -162,13 +146,25 @@ namespace
         }
         constexpr double worldScale = 1.25;
         const auto rotatedOffset = transform(localToWorld, offset);
-        const Vec3 tracked{
-            pivot.x + rotatedOffset.x * worldScale,
-            pivot.y + rotatedOffset.y * worldScale,
-            pivot.z + rotatedOffset.z * worldScale
-        };
-        require(distance(computeWorldPivot(tracked, adaptedLocalToWorld, worldScale, offset), pivot) < 1.0e-9,
-            "runtime transpose and world scale must reconstruct the pivot");
+        const Vec3 tracked{ pivot.x + rotatedOffset.x * worldScale, pivot.y + rotatedOffset.y * worldScale, pivot.z + rotatedOffset.z * worldScale };
+        require(distance(computeWorldPivot(tracked, adaptedLocalToWorld, worldScale, offset), pivot) < 1.0e-9, "runtime transpose and world scale must reconstruct the pivot");
+    }
+
+    void keepsPivotInvariantUnderRotationAndTranslation()
+    {
+        const Vec3 offset{ 0.4, 6.2, 8.7 };
+        constexpr double worldScale = 1.17;
+        constexpr std::array yawDegrees{ -85.0, -45.0, 0.0, 38.0, 90.0 };
+        constexpr std::array pitchDegrees{ -50.0, -20.0, 0.0, 25.0, 55.0 };
+
+        for (std::size_t index = 0; index < yawDegrees.size(); ++index) {
+            const Vec3 pivot{ 30.0 + static_cast<double>(index) * 4.0, -15.0 - static_cast<double>(index) * 2.5, 110.0 + static_cast<double>(index) };
+            const auto rotation = multiply(rotationZ(yawDegrees[index] * std::numbers::pi / 180.0), rotationX(pitchDegrees[index] * std::numbers::pi / 180.0));
+            const auto apparentTranslation = transform(rotation, offset);
+            const Vec3 tracked{ pivot.x + apparentTranslation.x * worldScale, pivot.y + apparentTranslation.y * worldScale, pivot.z + apparentTranslation.z * worldScale };
+
+            require(distance(computeWorldPivot(tracked, rotation, worldScale, offset), pivot) < 1.0e-9, "pure HMD rotation must not move the recovered anatomical pivot");
+        }
     }
 }
 
@@ -178,6 +174,7 @@ int main()
     rejectsSingleAxisMotion();
     resetsAfterRecenter();
     handlesRuntimeMatrixConventionAndScale();
+    keepsPivotInvariantUnderRotationAndTranslation();
     std::cout << "HmdPivotCalibrator tests passed\n";
     return 0;
 }

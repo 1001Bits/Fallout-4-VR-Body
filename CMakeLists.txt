@@ -108,7 +108,6 @@ add_library(${PROJECT_NAME} SHARED
   "${ROOT_DIR}/.clang-format"
   "${ROOT_DIR}/.editorconfig"
 )
-
 # >>> C++ standard & defs
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
 target_compile_definitions(${PROJECT_NAME} PRIVATE _UNICODE)
@@ -188,7 +187,17 @@ if(BUILD_TESTING)
   )
   target_compile_features(FRIKCalibrationTests PRIVATE cxx_std_23)
   target_include_directories(FRIKCalibrationTests PRIVATE ${SOURCE_DIR})
-  add_test(NAME HmdPivotCalibrator COMMAND FRIKCalibrationTests)
+  set_property(TARGET FRIKCalibrationTests PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+  add_test(NAME FRIK.HmdPivotCalibrator COMMAND FRIKCalibrationTests)
+
+  add_executable(FRIKArmIKTests
+    tests/ArmIKTests.cpp
+    src/ik/ArmIK.cpp
+    src/ik/ArmIK.h
+  )
+  target_compile_features(FRIKArmIKTests PRIVATE cxx_std_23)
+  set_property(TARGET FRIKArmIKTests PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+  add_test(NAME FRIK.ArmIK COMMAND FRIKArmIKTests)
 endif()
 
 # >>> fix a warning with /Ob2 being overridden with /Ob3
@@ -235,15 +244,3 @@ add_custom_command(
           -DCONFIG=$(Configuration)
           -P "${ROOT_DIR}/cmake/package.cmake"
 )
-
-# Pure solver regression tests intentionally avoid game/runtime dependencies.
-include(CTest)
-if(BUILD_TESTING)
-  add_executable(FRIKArmIKTests
-    tests/ArmIKTests.cpp
-    src/ik/ArmIK.cpp
-    src/ik/ArmIK.h
-  )
-  target_compile_features(FRIKArmIKTests PRIVATE cxx_std_23)
-  add_test(NAME FRIK.ArmIK COMMAND FRIKArmIKTests)
-endif()

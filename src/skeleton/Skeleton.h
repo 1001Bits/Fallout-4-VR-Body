@@ -2,6 +2,7 @@
 
 #include <array>
 #include <map>
+#include <optional>
 
 #include "CullGeometryHandler.h"
 #include "SelfieHandler.h"
@@ -46,8 +47,7 @@ namespace frik
     class Skeleton
     {
     public:
-        Skeleton(RE::NiNode* rootNode, const bool inPowerArmor) :
-            _root(rootNode), _inPowerArmor(inPowerArmor)
+        Skeleton(RE::NiNode* rootNode, const bool inPowerArmor) : _root(rootNode), _inPowerArmor(inPowerArmor)
         {
             _curentPosition = RE::NiPoint3(0, 0, 0);
             _lastPosition = _curentPosition;
@@ -57,15 +57,9 @@ namespace frik
             initializeNodes();
         }
 
-        ArmNodes getLeftArm() const
-        {
-            return _leftArm;
-        }
+        ArmNodes getLeftArm() const { return _leftArm; }
 
-        ArmNodes getRightArm() const
-        {
-            return _rightArm;
-        }
+        ArmNodes getRightArm() const { return _rightArm; }
 
         static float getAdjustedPlayerHMDOffset();
 
@@ -91,7 +85,7 @@ namespace frik
         void setBodyPosture(float neckPitch);
         void setKneePos();
         void walk();
-        void setSingleLeg(bool isLeft) const;
+        std::optional<float> setSingleLeg(bool isLeft) const;
         void handleLeftHandedWeaponNodesSwitch();
         void setArms(bool isLeft);
         void dampenHand(RE::NiNode* node, bool isLeft);
@@ -137,6 +131,13 @@ namespace frik
         bool _trackingWasValid = false;
         bool _hasLastPivotConfig = false;
         bool _lastPivotCorrectionEnabled = false;
+        bool _hasLastTrackingSource = false;
+        bool _lastUsedCameraFallback = false;
+        bool _hasLastSolverCalibration = false;
+        float _lastCalibratedPlayerHeight = 0.0f;
+        float _lastShoulderWidth = 0.0f;
+        float _lastLeftArmLength = 0.0f;
+        float _lastRightArmLength = 0.0f;
         float _lastNeckYaw = 0.0f;
         inline static float _comfortSneakCameraOffsetAdjustment = -1.0f;
 

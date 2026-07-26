@@ -4,9 +4,10 @@
 #include <cmath>
 
 #include "Config.h"
-#include "utils.h"
 #include "f4vr/PlayerNodes.h"
 #include "skeleton/HandPose.h"
+#include "skeleton/Skeleton.h"
+#include "utils.h"
 #include "vrui/UIButton.h"
 #include "vrui/UIManager.h"
 #include "vrui/UIToggleGroupContainer.h"
@@ -52,7 +53,7 @@ namespace
         for (const auto sample : samples) {
             deviations.push_back(std::abs(sample - center));
         }
-        const auto threshold = std::max(0.5f, 3.5f * 1.4826f * median(std::move(deviations)));
+        const auto threshold = (std::max)(0.5f, 3.5f * 1.4826f * median(std::move(deviations)));
 
         std::vector<float> inliers;
         inliers.reserve(samples.size());
@@ -67,9 +68,7 @@ namespace
 
 namespace frik
 {
-    BodyAdjustmentSubConfigMode::BodyAdjustmentSubConfigMode(const std::function<void()>& onClose) :
-        _onClose(onClose),
-        _hmdPivotCalibrator(getHmdPivotCalibratorSettings())
+    BodyAdjustmentSubConfigMode::BodyAdjustmentSubConfigMode(const std::function<void()>& onClose) : _onClose(onClose), _hmdPivotCalibrator(getHmdPivotCalibratorSettings())
     {
         createConfigUI();
     }
@@ -205,6 +204,10 @@ namespace frik
     void BodyAdjustmentSubConfigMode::closeConfig()
     {
         _hmdPivotCalibrator.reset();
+        _heightSamples.clear();
+        _wristSpanSamples.clear();
+        _wristSpanSampleTimes.clear();
+        _hasBilateralLegSlack = false;
 
         // reload config to revert unsaved values
         g_config.loadIniOnly();
@@ -276,10 +279,10 @@ namespace frik
 
         if (signedError != 0.0f && deltaTime > 0.0f && g_config.legSlackAutoAdjustRate > 0.0f) {
             const auto maximumStep = g_config.legSlackAutoAdjustRate * deltaTime;
-            const auto adjustment = std::copysign(std::min(std::abs(signedError), maximumStep), signedError);
+            const auto adjustment = std::copysign((std::min)(std::abs(signedError), maximumStep), signedError);
             const auto adjustedOffset = std::clamp(g_config.getPlayerLegSlackAdjustOffset() + adjustment, -50.0f, 50.0f);
-            logger::debug("Bilateral dt leg slack adjustment: low={}, high={}, dt={}, delta={}, offset={}",
-                _bilateralLegSlackLow, _bilateralLegSlackHigh, deltaTime, adjustment, adjustedOffset);
+            logger::debug("Bilateral dt leg slack adjustment: low={}, high={}, dt={}, delta={}, offset={}", _bilateralLegSlackLow, _bilateralLegSlackHigh, deltaTime, adjustment,
+                adjustedOffset);
             g_config.setPlayerLegSlackAdjustOffset(adjustedOffset);
         }
     }
@@ -354,6 +357,7 @@ namespace frik
             g_config.leftArmLength = defaultConfig.leftArmLength;
             g_config.rightArmLength = defaultConfig.rightArmLength;
             _wristSpanSamples.clear();
+            _wristSpanSampleTimes.clear();
             break;
         case BodyAdjustmentConfigTarget::VRScale:
             f4vr::showNotification("Reset VR Scale body adjustment config");
@@ -371,25 +375,19 @@ namespace frik
     void BodyAdjustmentSubConfigMode::clearConfigTarget()
     {
         _configTarget = BodyAdjustmentConfigTarget::None;
+        _hasBilateralLegSlack = false;
         _row2Container->clearToggleState();
     }
 
-    void BodyAdjustmentSubConfigMode::updateLegSlack(const float skeletonLegSlack)
+    void BodyAdjustmentSubConfigMode::updateLegSlack(const float rightLegSlack, const float leftLegSlack)
     {
-        if (!std::isfinite(skeletonLegSlack)) {
-            _hasPendingLegSlack = false;
+        if (!std::isfinite(rightLegSlack) || !std::isfinite(leftLegSlack)) {
             _hasBilateralLegSlack = false;
             return;
         }
-        if (!_hasPendingLegSlack) {
-            _pendingLegSlack = skeletonLegSlack;
-            _hasPendingLegSlack = true;
-            return;
-        }
 
-        _bilateralLegSlackLow = std::min(_pendingLegSlack, skeletonLegSlack);
-        _bilateralLegSlackHigh = std::max(_pendingLegSlack, skeletonLegSlack);
-        _hasPendingLegSlack = false;
+        _bilateralLegSlackLow = (std::min)(rightLegSlack, leftLegSlack);
+        _bilateralLegSlackHigh = (std::max)(rightLegSlack, leftLegSlack);
         _hasBilateralLegSlack = true;
     }
 
@@ -397,9 +395,12 @@ namespace frik
     {
         _hmdPivotCalibrator = calibration::HmdPivotCalibrator(getHmdPivotCalibratorSettings());
         _heightSamples.clear();
-        _lastLegSlackUpdate = std::chrono::steady_clock::now();
-        f4vr::showNotification(
-            "Height/HMD capture started\nStand upright, keep shoulders still; slowly look left/right/up/down, then press Save");
+        const auto now = std::chrono::steady_clock::now();
+        _heightCaptureStartedAt = now;
+        _lastHeightSampleAt = {};
+        _lastLegSlackUpdate = now;
+        _hasBilateralLegSlack = false;
+        f4vr::showNotification("Height/HMD capture started\nStand upright, keep shoulders still; slowly look left/right/up/down, then press Save");
     }
 
     void BodyAdjustmentSubConfigMode::captureHmdPivotSample()
@@ -420,8 +421,7 @@ namespace frik
             }
         }
         sample.worldScale = world.scale;
-        sample.timestampSeconds =
-            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        sample.timestampSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 
         if (_hmdPivotCalibrator.addSample(sample) == calibration::SampleStatus::ResetAfterTrackingDiscontinuity) {
             f4vr::showNotification("Tracking recentered; HMD pivot capture restarted");
@@ -433,71 +433,118 @@ namespace frik
         const auto result = _hmdPivotCalibrator.solve();
         if (!result.succeeded()) {
             logger::info("HMD pivot calibration rejected: {} (samples={}, inliers={}, duration={}, span={}, condition={}, rmse={})",
-                calibration::describeCalibrationFailure(result.failure), result.sampleCount, result.inlierCount, result.durationSeconds,
-                result.orientationSpanRadians, result.conditionNumber, result.residualRmse);
+                calibration::describeCalibrationFailure(result.failure), result.sampleCount, result.inlierCount, result.durationSeconds, result.orientationSpanRadians,
+                result.conditionNumber, result.residualRmse);
             f4vr::showNotification(std::string("HMD pivot not updated: ") + calibration::describeCalibrationFailure(result.failure));
             return false;
         }
 
-        g_config.setHmdPivotOffset(
-            static_cast<float>(result.pivotToHmdOffset.x),
-            static_cast<float>(result.pivotToHmdOffset.y),
-            static_cast<float>(result.pivotToHmdOffset.z));
-        logger::info("HMD pivot calibrated: offset=({}, {}, {}), samples={}/{}, condition={}, rmse={}",
-            result.pivotToHmdOffset.x, result.pivotToHmdOffset.y, result.pivotToHmdOffset.z,
-            result.inlierCount, result.sampleCount, result.conditionNumber, result.residualRmse);
+        g_config.setHmdPivotOffset(static_cast<float>(result.pivotToHmdOffset.x), static_cast<float>(result.pivotToHmdOffset.y), static_cast<float>(result.pivotToHmdOffset.z));
+        g_config.enableHmdPivotCorrection = true;
+        logger::info("HMD pivot calibrated: offset=({}, {}, {}), samples={}/{}, condition={}, rmse={}", result.pivotToHmdOffset.x, result.pivotToHmdOffset.y,
+            result.pivotToHmdOffset.z, result.inlierCount, result.sampleCount, result.conditionNumber, result.residualRmse);
         f4vr::showNotification("HMD pivot calibrated and saved with body adjustments");
         return true;
     }
 
     void BodyAdjustmentSubConfigMode::captureHeightSample()
     {
-        if (g_config.isPlayingSeated || _heightSamples.size() >= 600) {
+        if (g_config.isPlayingSeated) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (_lastHeightSampleAt.time_since_epoch().count() != 0 && now - _lastHeightSampleAt < std::chrono::milliseconds(30)) {
             return;
         }
         const auto nodes = f4vr::getPlayerNodes();
-        if (!nodes || !nodes->playerworldnode || !nodes->UprightHmdNode) {
+        if (!nodes || !nodes->playerworldnode || !nodes->UprightHmdNode || !nodes->HmdNode) {
             return;
         }
 
         // FRIK's UprightHmdNode local Z is the established unrotated playspace
         // height (the legacy default is ~120.48). It avoids world/root scale
         // and translation leaking back into this solver-only measurement.
-        const auto height = nodes->UprightHmdNode->local.translate.z;
-        if (std::isfinite(height) && height >= 60.0f && height <= 250.0f) {
-            _heightSamples.push_back(height);
+        const auto rawHeight = nodes->UprightHmdNode->local.translate.z;
+        const auto& hmdWorld = nodes->HmdNode->world;
+        const auto& playerWorld = nodes->playerworldnode->world;
+        if (!std::isfinite(rawHeight) || rawHeight < 60.0f || rawHeight > 250.0f || !std::isfinite(hmdWorld.scale) || !std::isfinite(playerWorld.scale) ||
+            std::abs(hmdWorld.scale) <= 0.0001f || std::abs(playerWorld.scale) <= 0.0001f) {
+            return;
         }
+
+        // Cache the linear contribution of every candidate tracker-local
+        // lever component. Save recomputes height after the pivot fitter has
+        // produced its final offset, keeping pure head rotation out of height.
+        const auto verticalPivotCoefficient = [&](const RE::NiPoint3& localAxis) {
+            const auto leverWorld = hmdWorld.rotate.Transpose() * (localAxis * hmdWorld.scale);
+            const auto correctionPlayer = playerWorld.rotate * ((leverWorld * -1.0f) / playerWorld.scale);
+            return correctionPlayer.z;
+        };
+
+        HeightCalibrationSample sample;
+        sample.rawUprightHeight = rawHeight;
+        sample.pivotCoefficientX = verticalPivotCoefficient(RE::NiPoint3(1.0f, 0.0f, 0.0f));
+        sample.pivotCoefficientY = verticalPivotCoefficient(RE::NiPoint3(0.0f, 1.0f, 0.0f));
+        sample.pivotCoefficientZ = verticalPivotCoefficient(RE::NiPoint3(0.0f, 0.0f, 1.0f));
+        sample.hmdToPlayerScale = hmdWorld.scale / playerWorld.scale;
+        if (!std::isfinite(sample.pivotCoefficientX) || !std::isfinite(sample.pivotCoefficientY) || !std::isfinite(sample.pivotCoefficientZ) ||
+            !std::isfinite(sample.hmdToPlayerScale)) {
+            return;
+        }
+
+        if (_heightSamples.size() >= 600) {
+            _heightSamples.erase(_heightSamples.begin());
+        }
+        _heightSamples.push_back(sample);
+        _lastHeightSampleAt = now;
     }
 
     void BodyAdjustmentSubConfigMode::beginArmSpanCalibration()
     {
         _wristSpanSamples.clear();
-        f4vr::showNotification(
-            "Arm-span capture started\nStand upright and hold both arms straight out horizontally, then press Save");
+        _wristSpanSampleTimes.clear();
+        const auto now = std::chrono::steady_clock::now();
+        _armSpanCaptureStartedAt = now;
+        _lastArmSpanSampleAt = {};
+        f4vr::showNotification("Arm-span capture started\nStand upright and hold both arms straight out horizontally, then press Save");
     }
 
     void BodyAdjustmentSubConfigMode::captureArmSpanSample()
     {
-        if (g_config.isPlayingSeated || _wristSpanSamples.size() >= 600) {
+        if (g_config.isPlayingSeated) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (_lastArmSpanSampleAt.time_since_epoch().count() != 0 && now - _lastArmSpanSampleAt < std::chrono::milliseconds(30)) {
             return;
         }
         const auto nodes = f4vr::getPlayerNodes();
-        if (!nodes || !nodes->UprightHmdNode || !nodes->primaryWandNode || !nodes->SecondaryWandNode) {
+        if (!nodes || !nodes->playerworldnode || !nodes->UprightHmdNode || !nodes->primaryWandNode || !nodes->SecondaryWandNode) {
             return;
         }
-        const auto primary = nodes->primaryWandNode->world.translate;
-        const auto secondary = nodes->SecondaryWandNode->world.translate;
-        const auto hmdZ = nodes->UprightHmdNode->world.translate.z;
+        const auto& playerWorld = nodes->playerworldnode->world;
+        if (!std::isfinite(playerWorld.scale) || std::abs(playerWorld.scale) <= 0.0001f) {
+            return;
+        }
+        const auto toPlayerSpace = [&](const RE::NiPoint3& worldPosition) { return playerWorld.rotate * ((worldPosition - playerWorld.translate) / playerWorld.scale); };
+        const auto primary = toPlayerSpace(nodes->primaryWandNode->world.translate);
+        const auto secondary = toPlayerSpace(nodes->SecondaryWandNode->world.translate);
+        const auto uprightHmd = toPlayerSpace(nodes->UprightHmdNode->world.translate);
+        const auto hmdZ = uprightHmd.z;
         const auto meanHandZ = (primary.z + secondary.z) * 0.5f;
         const auto delta = primary - secondary;
         const auto span = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
 
         // A near-horizontal T-pose is required; arbitrary controller positions
         // must not silently become body dimensions.
-        if (std::isfinite(span) && std::abs(primary.z - secondary.z) <= 8.0f
-            && meanHandZ <= hmdZ + 5.0f && meanHandZ >= hmdZ - 35.0f
-            && span >= 40.0f && span <= 180.0f) {
+        if (std::isfinite(span) && std::abs(primary.z - secondary.z) <= 8.0f && meanHandZ <= hmdZ + 5.0f && meanHandZ >= hmdZ - 35.0f && span >= 40.0f && span <= 180.0f) {
+            if (_wristSpanSamples.size() >= 600) {
+                _wristSpanSamples.erase(_wristSpanSamples.begin());
+                _wristSpanSampleTimes.erase(_wristSpanSampleTimes.begin());
+            }
             _wristSpanSamples.push_back(span);
+            _wristSpanSampleTimes.push_back(now);
+            _lastArmSpanSampleAt = now;
         }
     }
 
@@ -508,14 +555,31 @@ namespace frik
             return false;
         }
 
-        const auto heightInliers = rejectScalarOutliers(_heightSamples);
-        if (heightInliers.size() < 24) {
+        const auto captureDuration = std::chrono::duration<float>(std::chrono::steady_clock::now() - _heightCaptureStartedAt).count();
+        std::vector<float> neutralHeightSamples;
+        neutralHeightSamples.reserve(_heightSamples.size());
+        const auto hmdPlacementOffset = Skeleton::getAdjustedPlayerHMDOffset();
+        for (const auto& sample : _heightSamples) {
+            auto neutralHeight = sample.rawUprightHeight + hmdPlacementOffset;
+            if (g_config.enableHmdPivotCorrection) {
+                neutralHeight += sample.pivotCoefficientX * g_config.hmdPivotOffsetX + sample.pivotCoefficientY * g_config.hmdPivotOffsetY +
+                    sample.pivotCoefficientZ * g_config.hmdPivotOffsetZ + sample.hmdToPlayerScale * g_config.hmdPivotOffsetZ;
+            }
+            if (std::isfinite(neutralHeight)) {
+                neutralHeightSamples.push_back(neutralHeight);
+            }
+        }
+        const auto heightInliers = rejectScalarOutliers(neutralHeightSamples);
+        if (captureDuration < 1.5f || heightInliers.size() < 45) {
             f4vr::showNotification("Solver height unchanged: stand upright for a longer capture");
             return false;
         }
+        // The final pivot fit removes each sample's rotated tracker lever, then
+        // adds its neutral upright Z lever back. Runtime subtracts that neutral
+        // lever from this reference, so rotation alone cannot change posture.
         const auto measuredHeight = median(heightInliers);
-        const auto measuredShoulderWidth = DEFAULT_SHOULDER_WIDTH * measuredHeight / DEFAULT_CAMERA_HEIGHT;
-        if (!std::isfinite(measuredShoulderWidth) || measuredShoulderWidth < 15.0f || measuredShoulderWidth > 70.0f) {
+        const auto measuredShoulderWidth = std::clamp(DEFAULT_SHOULDER_WIDTH * measuredHeight / DEFAULT_CAMERA_HEIGHT, 15.0f, 70.0f);
+        if (!std::isfinite(measuredHeight) || measuredHeight < 60.0f || measuredHeight > 250.0f || !std::isfinite(measuredShoulderWidth)) {
             f4vr::showNotification("Solver height unchanged: fitted dimensions were outside safe limits");
             return false;
         }
@@ -533,7 +597,8 @@ namespace frik
             f4vr::showNotification("Solver arm lengths unchanged: standing T-pose capture is required");
             return false;
         }
-        if (_wristSpanSamples.size() < 12) {
+        const auto captureDuration = std::chrono::duration<float>(std::chrono::steady_clock::now() - _armSpanCaptureStartedAt).count();
+        if (captureDuration < 1.0f || _wristSpanSamples.size() < 30 || _wristSpanSamples.size() != _wristSpanSampleTimes.size()) {
             f4vr::showNotification("Solver arm lengths unchanged: hold both arms out horizontally");
             return false;
         }
@@ -548,23 +613,40 @@ namespace frik
             return false;
         }
 
+        const auto plateauTolerance = (std::max)(2.0f, extendedSpan * 0.03f);
         std::vector<float> plateau;
-        for (const auto span : sortedSpans) {
-            if (std::abs(span - extendedSpan) <= std::max(2.0f, extendedSpan * 0.03f)) {
-                plateau.push_back(span);
+        std::vector<float> currentPlateau;
+        auto currentPlateauStartedAt = _wristSpanSampleTimes.front();
+        auto previousAcceptedAt = currentPlateauStartedAt;
+        float bestPlateauDuration = 0.0f;
+        for (std::size_t index = 0; index < _wristSpanSamples.size(); ++index) {
+            if (std::abs(_wristSpanSamples[index] - extendedSpan) > plateauTolerance) {
+                currentPlateau.clear();
+                continue;
+            }
+
+            const auto sampleTime = _wristSpanSampleTimes[index];
+            if (currentPlateau.empty() || sampleTime - previousAcceptedAt > std::chrono::milliseconds(100)) {
+                currentPlateau.clear();
+                currentPlateauStartedAt = sampleTime;
+            }
+            currentPlateau.push_back(_wristSpanSamples[index]);
+            previousAcceptedAt = sampleTime;
+            const auto duration = std::chrono::duration<float>(sampleTime - currentPlateauStartedAt).count();
+            if (currentPlateau.size() > plateau.size() || (currentPlateau.size() == plateau.size() && duration > bestPlateauDuration)) {
+                plateau = currentPlateau;
+                bestPlateauDuration = duration;
             }
         }
-        if (plateau.size() < 12) {
+        if (plateau.size() < 30 || bestPlateauDuration < 0.9f) {
             f4vr::showNotification("Solver arm lengths unchanged: hold the outstretched pose steadily");
             return false;
         }
 
         const auto measuredSpan = median(plateau);
-        const auto measuredShoulderWidth =
-            DEFAULT_SHOULDER_WIDTH * g_config.calibratedPlayerHeight / DEFAULT_CAMERA_HEIGHT;
+        const auto measuredShoulderWidth = DEFAULT_SHOULDER_WIDTH * g_config.calibratedPlayerHeight / DEFAULT_CAMERA_HEIGHT;
         const auto symmetricArmLength = (measuredSpan - measuredShoulderWidth) * 0.5f;
-        if (!std::isfinite(symmetricArmLength) || measuredShoulderWidth < 15.0f || measuredShoulderWidth > 70.0f
-            || symmetricArmLength < 15.0f || symmetricArmLength > 80.0f) {
+        if (!std::isfinite(symmetricArmLength) || measuredShoulderWidth < 15.0f || measuredShoulderWidth > 70.0f || symmetricArmLength < 15.0f || symmetricArmLength > 80.0f) {
             f4vr::showNotification("Solver arm lengths unchanged: fitted dimensions were outside safe limits");
             return false;
         }
@@ -575,8 +657,7 @@ namespace frik
         g_config.leftArmLength = symmetricArmLength;
         g_config.rightArmLength = symmetricArmLength;
         g_config.armLength = symmetricArmLength;
-        logger::info("Solver arm span calibrated: wristSpan={}, shoulderWidth={}, armLength={}",
-            measuredSpan, measuredShoulderWidth, symmetricArmLength);
+        logger::info("Solver arm span calibrated: wristSpan={}, shoulderWidth={}, armLength={}", measuredSpan, measuredShoulderWidth, symmetricArmLength);
         f4vr::showNotification("Solver shoulder width and symmetric arm lengths calibrated");
         return true;
     }

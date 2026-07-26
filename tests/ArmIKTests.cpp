@@ -1,18 +1,17 @@
 #include "../src/ik/ArmIK.h"
 
-#include <cstdlib>
+#include <array>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <numbers>
 
 namespace
 {
     constexpr float kTolerance = 1.0e-3f;
 
-    bool close(const float lhs, const float rhs, const float tolerance = kTolerance)
-    {
-        return std::abs(lhs - rhs) <= tolerance;
-    }
+    bool close(const float lhs, const float rhs, const float tolerance = kTolerance) { return std::abs(lhs - rhs) <= tolerance; }
 
     void require(const bool condition, const char* message)
     {
@@ -24,8 +23,7 @@ namespace
 
     frik::ik::ArmSolveInput makeInput()
     {
-        return {
-            .shoulder = { 0.0f, 0.0f, 0.0f },
+        return { .shoulder = { 0.0f, 0.0f, 0.0f },
             .hand = { 8.0f, 24.0f, 4.0f },
             .bodyForward = { 0.0f, 1.0f, 0.0f },
             .bodyOutward = { 1.0f, 0.0f, 0.0f },
@@ -34,8 +32,16 @@ namespace
             .handSide = { 1.0f, 0.0f, 0.0f },
             .upperLength = 16.0f,
             .lowerLength = 15.0f,
-            .deltaTime = 1.0f / 90.0f
-        };
+            .deltaTime = 1.0f / 90.0f };
+    }
+
+    float smoothForOneSecond(const int refreshRate)
+    {
+        float value = 0.0f;
+        for (int frame = 0; frame < refreshRate; ++frame) {
+            value += (1.0f - value) * frik::ik::smoothingAlpha(1.0f / static_cast<float>(refreshRate), 0.05f);
+        }
+        return value;
     }
 }
 
@@ -67,6 +73,34 @@ int main()
     require(close(solved.elbow.y, mirrored.elbow.y, 0.01f), "mirrored elbow preserves forward coordinate");
     require(close(solved.elbow.z, mirrored.elbow.z, 0.01f), "mirrored elbow preserves vertical coordinate");
 
+    // Exact lateral T-poses used to choose opposite tangent hemispheres for
+    // left and right because tangent dot outward is zero in this pose.
+    auto rightTposeInput = makeInput();
+    rightTposeInput.hand = { 25.0f, 0.0f, 0.0f };
+    rightTposeInput.bodyOutward = { 1.0f, 0.0f, 0.0f };
+    rightTposeInput.handBack = { 0.0f, -1.0f, 0.0f };
+    ArmContinuityState rightTposeState;
+    const auto rightTpose = solveArm(rightTposeInput, rightTposeState);
+
+    auto leftTposeInput = rightTposeInput;
+    leftTposeInput.hand.x *= -1.0f;
+    leftTposeInput.bodyOutward.x *= -1.0f;
+    ArmContinuityState leftTposeState;
+    const auto leftTpose = solveArm(leftTposeInput, leftTposeState);
+    require(rightTpose.valid && leftTpose.valid, "exact lateral T-poses solve");
+    require(close(rightTpose.elbow.x, -leftTpose.elbow.x, 0.01f), "T-pose elbow mirrors laterally");
+    require(close(rightTpose.elbow.y, leftTpose.elbow.y, 0.01f), "T-pose elbows choose the same fore-aft hemisphere");
+    require(close(rightTpose.elbow.z, leftTpose.elbow.z, 0.01f), "T-pose elbows preserve vertical symmetry");
+
+    auto crossingInput = rightTposeInput;
+    ArmContinuityState crossingState;
+    crossingInput.hand.y = -0.01f;
+    const auto crossingA = solveArm(crossingInput, crossingState);
+    crossingInput.hand.y = 0.01f;
+    const auto crossingB = solveArm(crossingInput, crossingState);
+    require(crossingA.valid && crossingB.valid, "near-lateral sweep solves");
+    require(dot(crossingA.pole, crossingB.pole) > 0.95f, "pole does not flip as a T-pose crosses body-forward zero");
+
     // Small movements across the shoulder-up singularity must keep the pole
     // continuous rather than flipping to the opposite side.
     auto verticalInput = input;
@@ -89,39 +123,62 @@ int main()
     require(isFinite(wristDegenerate.wristCorrection), "secondary-axis wrist correction stays finite");
     require(isFinite(wristDegenerate.pole), "secondary-axis pole stays finite");
 
+    // Unequal segments (notably Power Armor) remain continuous at the inner
+    // reachable radius instead of abruptly becoming two equal segments.
+    auto foldedInput = input;
+    foldedInput.upperLength = 20.0f;
+    foldedInput.lowerLength = 12.0f;
+    foldedInput.hand = { 7.99f, 0.0f, 0.0f };
+    ArmContinuityState foldedState;
+    const auto foldedInside = solveArm(foldedInput, foldedState);
+    foldedInput.hand = { 8.01f, 0.0f, 0.0f };
+    const auto foldedOutside = solveArm(foldedInput, foldedState);
+    require(foldedInside.valid && foldedOutside.valid, "poses around unequal-segment inner radius solve");
+    require(std::abs(foldedInside.upperLength - foldedInside.lowerLength) > 7.9f, "inner-radius handling preserves unequal segment character");
+    require(std::abs(foldedInside.upperLength - foldedOutside.upperLength) < 0.03f, "inner-radius segment adjustment is continuous");
+    require(close(foldedInside.solvedReach, 7.99f, 0.001f) && close(foldedOutside.solvedReach, 8.01f, 0.001f), "folded poses preserve the tracked endpoint");
+
     // Reach beyond the calibrated arm is handled without invalid cosine-rule
     // inputs, while clearly bad tracking remains rejected.
     auto stretchedInput = input;
-    stretchedInput.hand = { 0.0f, 35.0f, 0.0f };
+    stretchedInput.hand = { 0.0f, 32.0f, 0.0f };
     ArmContinuityState stretchedState;
     const auto stretched = solveArm(stretchedInput, stretchedState);
     require(stretched.valid && stretched.stretched, "moderate overreach solves with soft extension");
-    require(
-        stretched.upperLength + stretched.lowerLength <=
-            (stretchedInput.upperLength + stretchedInput.lowerLength) * 1.061f,
-        "soft extension is bounded to six percent");
-    require(
-        stretched.solvedReach < length(stretchedInput.hand - stretchedInput.shoulder),
-        "analytic reach clamps before unreachable tracked target");
-    require(
-        close(length(stretched.elbow - stretchedInput.shoulder), stretched.upperLength, 0.01f),
-        "bounded overreach preserves upper length");
-    const auto stretchedHand =
-        stretchedInput.shoulder + safeNormalize(stretchedInput.hand - stretchedInput.shoulder) * stretched.solvedReach;
+    require(stretched.upperLength + stretched.lowerLength <= (stretchedInput.upperLength + stretchedInput.lowerLength) * 1.061f, "soft extension is bounded to six percent");
+    require(close(stretched.solvedReach, length(stretchedInput.hand - stretchedInput.shoulder), 0.001f), "every valid solve preserves the tracked hand target");
+    require(close(length(stretched.elbow - stretchedInput.shoulder), stretched.upperLength, 0.01f), "bounded overreach preserves upper length");
+    const auto stretchedHand = stretchedInput.shoulder + safeNormalize(stretchedInput.hand - stretchedInput.shoulder) * stretched.solvedReach;
     require(close(length(stretchedHand - stretched.elbow), stretched.lowerLength, 0.01f), "bounded overreach preserves lower length");
 
-    stretchedInput.hand = { 0.0f, 80.0f, 0.0f };
+    stretchedInput.hand = { 0.0f, 35.0f, 0.0f };
     const auto invalid = solveArm(stretchedInput, stretchedState);
-    require(!invalid.valid, "egregious tracking target is rejected");
+    require(!invalid.valid, "overreach beyond bounded extension is rejected");
 
-    // Exponential smoothing composes consistently across frame rates.
-    float at45Hz = 0.0f;
-    float at90Hz = 0.0f;
-    for (int i = 0; i < 45; ++i) {
-        at45Hz += (1.0f - at45Hz) * smoothingAlpha(1.0f / 45.0f, 0.05f);
+    stretchedInput.hand = { 0.0f, 80.0f, 0.0f };
+    require(!solveArm(stretchedInput, stretchedState).valid, "egregious tracking target is rejected");
+
+    auto nonFiniteInput = input;
+    nonFiniteInput.hand.x = std::numeric_limits<float>::quiet_NaN();
+    const auto priorPole = state.pole;
+    const auto nonFinite = solveArm(nonFiniteInput, state);
+    require(!nonFinite.valid, "non-finite tracking input is rejected");
+    require(state.hasPole && dot(state.pole, priorPole) > 0.999f, "rejected input does not poison continuity state");
+
+    auto zeroBasisInput = input;
+    zeroBasisInput.bodyForward = {};
+    zeroBasisInput.bodyOutward = {};
+    zeroBasisInput.bodyUp = {};
+    zeroBasisInput.handBack = {};
+    zeroBasisInput.handSide = {};
+    ArmContinuityState zeroBasisState;
+    const auto zeroBasis = solveArm(zeroBasisInput, zeroBasisState);
+    require(zeroBasis.valid && isFinite(zeroBasis.elbow), "degenerate tracking axes use finite fallbacks");
+
+    // Exponential smoothing composes consistently across common VR refresh rates.
+    constexpr std::array refreshRates{ 45, 72, 90, 120 };
+    const float reference = smoothForOneSecond(refreshRates.front());
+    for (const int refreshRate : refreshRates) {
+        require(close(reference, smoothForOneSecond(refreshRate), 1.0e-5f), "time-based smoothing is frame-rate independent");
     }
-    for (int i = 0; i < 90; ++i) {
-        at90Hz += (1.0f - at90Hz) * smoothingAlpha(1.0f / 90.0f, 0.05f);
-    }
-    require(close(at45Hz, at90Hz, 1.0e-5f), "time-based smoothing is frame-rate independent");
 }

@@ -212,41 +212,23 @@ namespace frik
         validateSolverCalibrationConfig();
     }
 
-    void Config::resetHmdPivotOffset()
-    {
-        setHmdPivotOffset(DEFAULT_HMD_PIVOT_OFFSET_X, DEFAULT_HMD_PIVOT_OFFSET_Y, DEFAULT_HMD_PIVOT_OFFSET_Z);
-    }
+    void Config::resetHmdPivotOffset() { setHmdPivotOffset(DEFAULT_HMD_PIVOT_OFFSET_X, DEFAULT_HMD_PIVOT_OFFSET_Y, DEFAULT_HMD_PIVOT_OFFSET_Z); }
 
-    float Config::getNormalizedShoulderWidth() const
-    {
-        return shoulderWidth / calibratedPlayerHeight;
-    }
+    float Config::getNormalizedShoulderWidth() const { return shoulderWidth / calibratedPlayerHeight; }
 
-    float Config::getNormalizedLeftArmLength() const
-    {
-        return leftArmLength / calibratedPlayerHeight;
-    }
+    float Config::getNormalizedLeftArmLength() const { return leftArmLength / calibratedPlayerHeight; }
 
-    float Config::getNormalizedRightArmLength() const
-    {
-        return rightArmLength / calibratedPlayerHeight;
-    }
+    float Config::getNormalizedRightArmLength() const { return rightArmLength / calibratedPlayerHeight; }
 
     /**
      * Open the FRIK.ini file in Notepad for editing.
      */
-    void Config::openInNotepad()
-    {
-        ShellExecuteA(nullptr, "open", "notepad.exe", FRIK_INI_PATH.c_str(), nullptr, SW_SHOWNORMAL);
-    }
+    void Config::openInNotepad() { ShellExecuteA(nullptr, "open", "notepad.exe", FRIK_INI_PATH.c_str(), nullptr, SW_SHOWNORMAL); }
 
     /**
      * Get the Pipboy offset of the currently used Pipboy type.
      */
-    RE::NiTransform Config::getPipboyOffset()
-    {
-        return _pipboyOffsets[getPipboyOffsetKey()];
-    }
+    RE::NiTransform Config::getPipboyOffset() { return _pipboyOffsets[getPipboyOffsetKey()]; }
 
     /**
      * Save the Pipboy offset to the offsets map.
@@ -316,13 +298,22 @@ namespace frik
         hmdPivotOffsetY = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fHmdPivotOffsetY", DEFAULT_HMD_PIVOT_OFFSET_Y));
         hmdPivotOffsetZ = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fHmdPivotOffsetZ", DEFAULT_HMD_PIVOT_OFFSET_Z));
         calibratedPlayerHeight = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fCalibratedPlayerHeight", playerHeight));
-        shoulderWidth = static_cast<float>(
-            ini.GetDoubleValue(INI_SECTION_MAIN, "fShoulderWidth", DEFAULT_SHOULDER_WIDTH * calibratedPlayerHeight / DEFAULT_CAMERA_HEIGHT));
+        shoulderWidth = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fShoulderWidth", DEFAULT_SHOULDER_WIDTH * calibratedPlayerHeight / DEFAULT_CAMERA_HEIGHT));
         leftArmLength = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fLeftArmLength", armLength));
         rightArmLength = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fRightArmLength", armLength));
         hmdPivotCalibrationDuration = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fHmdPivotCalibrationDuration", 10.0f));
         legSlackAutoAdjustRate = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fLegSlackAutoAdjustRate", 3.0f));
         validateSolverCalibrationConfig();
+
+        // armLength remains the authoritative compatibility alias while both
+        // side values are symmetric. Distinct side values explicitly opt into
+        // asymmetric mode and keep the legacy value synchronized to their mean.
+        if (std::abs(leftArmLength - rightArmLength) <= 0.001f) {
+            leftArmLength = armLength;
+            rightArmLength = armLength;
+        } else {
+            armLength = (leftArmLength + rightArmLength) * 0.5f;
+        }
 
         // Head Geometry Hide
         hideHead = ini.GetBoolValue(INI_SECTION_MAIN, "bHidePlayerHead");
@@ -433,6 +424,12 @@ namespace frik
     {
         // Values may have been changed by an in-game configurator since load.
         validateSolverCalibrationConfig();
+        if (std::abs(leftArmLength - rightArmLength) <= 0.001f) {
+            leftArmLength = armLength;
+            rightArmLength = armLength;
+        } else {
+            armLength = (leftArmLength + rightArmLength) * 0.5f;
+        }
 
         ini.SetBoolValue(INI_SECTION_MAIN, "bIsPlayingSeated", isPlayingSeated);
         ini.SetDoubleValue(INI_SECTION_MAIN, "fVrScale", fVrScale);
@@ -497,7 +494,8 @@ namespace frik
         validate("fHmdPivotOffsetY", hmdPivotOffsetY, 1.0f, 16.0f, DEFAULT_HMD_PIVOT_OFFSET_Y);
         validate("fHmdPivotOffsetZ", hmdPivotOffsetZ, 2.0f, 20.0f, DEFAULT_HMD_PIVOT_OFFSET_Z);
         validate("fCalibratedPlayerHeight", calibratedPlayerHeight, 60.0f, 250.0f, playerHeight);
-        validate("fShoulderWidth", shoulderWidth, 15.0f, 70.0f, DEFAULT_SHOULDER_WIDTH * calibratedPlayerHeight / DEFAULT_CAMERA_HEIGHT);
+        const float derivedShoulderWidth = std::clamp(DEFAULT_SHOULDER_WIDTH * calibratedPlayerHeight / DEFAULT_CAMERA_HEIGHT, 15.0f, 70.0f);
+        validate("fShoulderWidth", shoulderWidth, 15.0f, 70.0f, derivedShoulderWidth);
         validate("fLeftArmLength", leftArmLength, 15.0f, 80.0f, armLength);
         validate("fRightArmLength", rightArmLength, 15.0f, 80.0f, armLength);
         validate("fHmdPivotCalibrationDuration", hmdPivotCalibrationDuration, 4.0f, 30.0f, 10.0f);
@@ -509,8 +507,7 @@ namespace frik
      * Seed new solver values from legacy body settings so existing users keep
      * their proportions while the new defaults/comments are installed.
      */
-    void Config::updateIniConfigToLatestVersionCustom(
-        const int currentVersion, const int, const CSimpleIniA& oldIni, CSimpleIniA& newIni) const
+    void Config::updateIniConfigToLatestVersionCustom(const int currentVersion, const int, const CSimpleIniA& oldIni, CSimpleIniA& newIni) const
     {
         if (currentVersion >= 17) {
             return;
@@ -525,13 +522,18 @@ namespace frik
             newIni.SetDoubleValue(INI_SECTION_MAIN, "fCalibratedPlayerHeight", safeHeight);
         }
         if (!oldIni.GetValue(INI_SECTION_MAIN, "fShoulderWidth")) {
-            newIni.SetDoubleValue(INI_SECTION_MAIN, "fShoulderWidth", DEFAULT_SHOULDER_WIDTH * safeHeight / DEFAULT_CAMERA_HEIGHT);
+            newIni.SetDoubleValue(INI_SECTION_MAIN, "fShoulderWidth", std::clamp(DEFAULT_SHOULDER_WIDTH * safeHeight / DEFAULT_CAMERA_HEIGHT, 15.0f, 70.0f));
         }
         if (!oldIni.GetValue(INI_SECTION_MAIN, "fLeftArmLength")) {
             newIni.SetDoubleValue(INI_SECTION_MAIN, "fLeftArmLength", safeArmLength);
         }
         if (!oldIni.GetValue(INI_SECTION_MAIN, "fRightArmLength")) {
             newIni.SetDoubleValue(INI_SECTION_MAIN, "fRightArmLength", safeArmLength);
+        }
+        if (!oldIni.GetValue(INI_SECTION_MAIN, "bEnableHmdPivotCorrection")) {
+            // Preserve the legacy body anchor and its tuned placement offsets.
+            // A successful in-game pivot calibration opts the user in.
+            newIni.SetBoolValue(INI_SECTION_MAIN, "bEnableHmdPivotCorrection", false);
         }
     }
 
@@ -557,17 +559,9 @@ namespace frik
     {
         const auto slotsGeometry = loadListFromFile(MESH_HIDE_SLOTS_INI_PATH);
 
-        std::unordered_map<std::string, int> slotToIndexMap = {
-            { "hairtop", 0 }, // i.e. helmet
-            { "hairlong", 1 },
-            { "head", 2 },
-            { "headband", 16 },
-            { "eyes", 17 }, // i.e. glasses
-            { "beard", 18 },
-            { "mouth", 19 },
-            { "neck", 20 },
-            { "scalp", 22 }
-        };
+        std::unordered_map<std::string, int> slotToIndexMap = { { "hairtop", 0 }, // i.e. helmet
+            { "hairlong", 1 }, { "head", 2 }, { "headband", 16 }, { "eyes", 17 }, // i.e. glasses
+            { "beard", 18 }, { "mouth", 19 }, { "neck", 20 }, { "scalp", 22 } };
 
         _hideEquipSlotIndexes.clear();
         for (auto& geometry : slotsGeometry) {

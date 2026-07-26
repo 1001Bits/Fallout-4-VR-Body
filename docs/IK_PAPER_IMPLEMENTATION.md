@@ -74,8 +74,16 @@ The arm solve preserves the tracked hand target and uses:
    dead zone.
 6. Time-constant filtering derived from frame time.
 
+Accepted targets are solved to the raw tracked hand, with at most 6% of
+proportional segment extension for calibration noise. A target still outside
+that reachable set is rejected before the body-arm pose is committed; it is
+never represented by shortening the cosmetic arm away from the weapon.
 No cosmetic smoothing is allowed to delay or move the weapon/controller
 target.
+
+Arm-chain writes are transactional. The prior local pose is restored unless
+the complete candidate has finite, right-handed, near-orthonormal local and
+world rotations and its final hand remains coincident with the raw target.
 
 ## Calibration
 
@@ -100,11 +108,12 @@ change the skeleton root scale or weapon transform hierarchy.
   pelvis, feet, or hands and does not start a gait step.
 - True HMD/pivot translation passes through without attenuation.
 - Every committed transform is finite.
-- Reachable arm targets preserve configured segment lengths.
-- Unreachable targets use bounded shoulder assistance and soft reach
-  limits without NaN, discontinuity, or multi-length stretching.
+- Reachable arm targets preserve the configured segment ratio and place the
+  hand on the tracked target.
+- Unreachable targets use bounded shoulder assistance and at most 6% soft
+  extension; otherwise the candidate is rejected without a shortened wrist,
+  NaN, or partial pose write.
 - Solver behavior remains materially equivalent at 45, 72, 90, and
   120 Hz.
 - Tracking loss, recenter, teleport, load, and Power Armor transitions
   reset temporal state instead of producing a one-frame spike.
-

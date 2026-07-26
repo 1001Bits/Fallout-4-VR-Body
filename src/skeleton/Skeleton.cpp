@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include <utility>
 
 #include "Config.h"
 #include "FRIK.h"
@@ -26,29 +27,21 @@ namespace
     constexpr float kDirectionChangeDelaySeconds = 2.0f / 90.0f;
     constexpr float kStepRetargetDeceleration = -20.0f * 90.0f;
 
-    frik::ik::Vec3 toIKVector(const RE::NiPoint3& value)
-    {
-        return { value.x, value.y, value.z };
-    }
+    frik::ik::Vec3 toIKVector(const RE::NiPoint3& value) { return { value.x, value.y, value.z }; }
 
-    RE::NiPoint3 toNiPoint(const frik::ik::Vec3& value)
-    {
-        return { value.x, value.y, value.z };
-    }
+    RE::NiPoint3 toNiPoint(const frik::ik::Vec3& value) { return { value.x, value.y, value.z }; }
 
     bool isFinite(const RE::NiPoint3& value)
     {
-        return frik::ik::isFinite(toIKVector(value)) &&
-            std::abs(value.x) < kMaximumTrackedPosition &&
-            std::abs(value.y) < kMaximumTrackedPosition &&
+        return frik::ik::isFinite(toIKVector(value)) && std::abs(value.x) < kMaximumTrackedPosition && std::abs(value.y) < kMaximumTrackedPosition &&
             std::abs(value.z) < kMaximumTrackedPosition;
     }
 
     bool isFinite(const RE::NiMatrix3& value)
     {
-        for (const auto& row : value.entry) {
-            for (const float component : row) {
-                if (!frik::ik::isFinite(component)) {
+        for (std::uint32_t row = 0; row < 3; ++row) {
+            for (std::uint32_t column = 0; column < 3; ++column) {
+                if (!frik::ik::isFinite(value.entry[row][column])) {
                     return false;
                 }
             }
@@ -58,31 +51,49 @@ namespace
 
     bool isFinite(const RE::NiTransform& transform)
     {
-        if (!isFinite(transform.translate) || !isFinite(transform.rotate) ||
-            !std::isfinite(transform.scale) || transform.scale <= kVectorEpsilon) {
+        if (!isFinite(transform.translate) || !isFinite(transform.rotate) || !std::isfinite(transform.scale) || transform.scale <= kVectorEpsilon) {
             return false;
         }
 
         // Reject a finite but collapsed/corrupt orientation.  Thresholds are
         // intentionally loose because engine matrices can contain small drift.
-        const RE::NiPoint3 basisX(
-            transform.rotate.entry[0][0],
-            transform.rotate.entry[0][1],
-            transform.rotate.entry[0][2]);
-        const RE::NiPoint3 basisY(
-            transform.rotate.entry[1][0],
-            transform.rotate.entry[1][1],
-            transform.rotate.entry[1][2]);
-        const RE::NiPoint3 basisZ(
-            transform.rotate.entry[2][0],
-            transform.rotate.entry[2][1],
-            transform.rotate.entry[2][2]);
+        const RE::NiPoint3 basisX(transform.rotate.entry[0][0], transform.rotate.entry[0][1], transform.rotate.entry[0][2]);
+        const RE::NiPoint3 basisY(transform.rotate.entry[1][0], transform.rotate.entry[1][1], transform.rotate.entry[1][2]);
+        const RE::NiPoint3 basisZ(transform.rotate.entry[2][0], transform.rotate.entry[2][1], transform.rotate.entry[2][2]);
         const float lengthX = MatrixUtils::vec3Len(basisX);
         const float lengthY = MatrixUtils::vec3Len(basisY);
         const float lengthZ = MatrixUtils::vec3Len(basisZ);
-        return lengthX > 0.5f && lengthX < 1.5f &&
-            lengthY > 0.5f && lengthY < 1.5f &&
-            lengthZ > 0.5f && lengthZ < 1.5f;
+        return lengthX > 0.5f && lengthX < 1.5f && lengthY > 0.5f && lengthY < 1.5f && lengthZ > 0.5f && lengthZ < 1.5f;
+    }
+
+    bool isNearlyOrthonormal(const RE::NiMatrix3& value)
+    {
+        if (!isFinite(value)) {
+            return false;
+        }
+
+        const RE::NiPoint3 rowX(value.entry[0][0], value.entry[0][1], value.entry[0][2]);
+        const RE::NiPoint3 rowY(value.entry[1][0], value.entry[1][1], value.entry[1][2]);
+        const RE::NiPoint3 rowZ(value.entry[2][0], value.entry[2][1], value.entry[2][2]);
+        constexpr float lengthTolerance = 0.03f;
+        constexpr float dotTolerance = 0.03f;
+        constexpr float determinantTolerance = 0.06f;
+        const float determinant = MatrixUtils::vec3Dot(rowX, MatrixUtils::vec3Cross(rowY, rowZ));
+        return std::abs(MatrixUtils::vec3Len(rowX) - 1.0f) <= lengthTolerance && std::abs(MatrixUtils::vec3Len(rowY) - 1.0f) <= lengthTolerance &&
+            std::abs(MatrixUtils::vec3Len(rowZ) - 1.0f) <= lengthTolerance && std::abs(MatrixUtils::vec3Dot(rowX, rowY)) <= dotTolerance &&
+            std::abs(MatrixUtils::vec3Dot(rowX, rowZ)) <= dotTolerance && std::abs(MatrixUtils::vec3Dot(rowY, rowZ)) <= dotTolerance && std::isfinite(determinant) &&
+            std::abs(determinant - 1.0f) <= determinantTolerance;
+    }
+
+    float maximumMatrixDifference(const RE::NiMatrix3& lhs, const RE::NiMatrix3& rhs)
+    {
+        float maximumDifference = 0.0f;
+        for (std::uint32_t row = 0; row < 3; ++row) {
+            for (std::uint32_t column = 0; column < 3; ++column) {
+                maximumDifference = (std::max)(maximumDifference, std::abs(lhs.entry[row][column] - rhs.entry[row][column]));
+            }
+        }
+        return maximumDifference;
     }
 
     bool tryNormalize(const RE::NiPoint3& input, RE::NiPoint3& output)
@@ -96,9 +107,7 @@ namespace
         return isFinite(output);
     }
 
-    RE::NiPoint3 safeNormalize(
-        const RE::NiPoint3& value,
-        const RE::NiPoint3& fallback = { 1.0f, 0.0f, 0.0f })
+    RE::NiPoint3 safeNormalize(const RE::NiPoint3& value, const RE::NiPoint3& fallback = { 1.0f, 0.0f, 0.0f })
     {
         RE::NiPoint3 normalized;
         if (tryNormalize(value, normalized)) {
@@ -110,19 +119,76 @@ namespace
         return RE::NiPoint3(1.0f, 0.0f, 0.0f);
     }
 
-    bool tryNormalizePlanar(const RE::NiPoint3& input, RE::NiPoint3& output)
+    bool tryGetRotationFromVectors(const RE::NiPoint3& toVector, const RE::NiPoint3& fromVector, RE::NiMatrix3& result)
     {
-        return tryNormalize(RE::NiPoint3(input.x, input.y, 0.0f), output);
+        RE::NiPoint3 to;
+        RE::NiPoint3 from;
+        if (!tryNormalize(toVector, to) || !tryNormalize(fromVector, from)) {
+            return false;
+        }
+
+        const float dot = std::clamp(MatrixUtils::vec3Dot(from, to), -1.0f, 1.0f);
+        if (dot >= 0.99999f) {
+            result = MatrixUtils::getIdentityMatrix();
+            return true;
+        }
+
+        RE::NiPoint3 axis = MatrixUtils::vec3Cross(to, from);
+        if (!tryNormalize(axis, axis)) {
+            // Antiparallel vectors have infinitely many valid axes. Pick a
+            // deterministic cardinal axis least parallel to the source.
+            const RE::NiPoint3 cardinal = std::abs(from.x) < 0.8f ? RE::NiPoint3(1.0f, 0.0f, 0.0f) : RE::NiPoint3(0.0f, 1.0f, 0.0f);
+            if (!tryNormalize(MatrixUtils::vec3Cross(cardinal, from), axis)) {
+                return false;
+            }
+        }
+
+        const float angle = std::acos(dot);
+        const float cosine = std::cos(angle);
+        const float sine = std::sin(angle);
+        const float oneMinusCosine = 1.0f - cosine;
+        // Assign rows directly. MatrixUtils::getMatrix accepts column-major
+        // arguments and would transpose this world-to-local delta.
+        result.entry[0][0] = cosine + axis.x * axis.x * oneMinusCosine;
+        result.entry[0][1] = -axis.z * sine + axis.x * axis.y * oneMinusCosine;
+        result.entry[0][2] = axis.y * sine + axis.x * axis.z * oneMinusCosine;
+        result.entry[1][0] = axis.z * sine + axis.y * axis.x * oneMinusCosine;
+        result.entry[1][1] = cosine + axis.y * axis.y * oneMinusCosine;
+        result.entry[1][2] = -axis.x * sine + axis.y * axis.z * oneMinusCosine;
+        result.entry[2][0] = -axis.y * sine + axis.z * axis.x * oneMinusCosine;
+        result.entry[2][1] = axis.x * sine + axis.z * axis.y * oneMinusCosine;
+        result.entry[2][2] = cosine + axis.z * axis.z * oneMinusCosine;
+        return isNearlyOrthonormal(result);
     }
 
-    bool tryLawOfCosinesAngle(
-        const float adjacentA,
-        const float adjacentB,
-        const float opposite,
-        float& angle)
+    template <class Function>
+    class ScopeExit
     {
-        if (!std::isfinite(adjacentA) || !std::isfinite(adjacentB) || !std::isfinite(opposite) ||
-            adjacentA <= kVectorEpsilon || adjacentB <= kVectorEpsilon || opposite < 0.0f) {
+    public:
+        explicit ScopeExit(Function function) : _function(std::move(function)) {}
+
+        ScopeExit(const ScopeExit&) = delete;
+        ScopeExit& operator=(const ScopeExit&) = delete;
+
+        ~ScopeExit()
+        {
+            if (_active) {
+                _function();
+            }
+        }
+
+        void release() noexcept { _active = false; }
+
+    private:
+        Function _function;
+        bool _active = true;
+    };
+
+    bool tryNormalizePlanar(const RE::NiPoint3& input, RE::NiPoint3& output) { return tryNormalize(RE::NiPoint3(input.x, input.y, 0.0f), output); }
+
+    bool tryLawOfCosinesAngle(const float adjacentA, const float adjacentB, const float opposite, float& angle)
+    {
+        if (!std::isfinite(adjacentA) || !std::isfinite(adjacentB) || !std::isfinite(opposite) || adjacentA <= kVectorEpsilon || adjacentB <= kVectorEpsilon || opposite < 0.0f) {
             return false;
         }
 
@@ -131,17 +197,24 @@ namespace
             return false;
         }
 
-        const float cosine = std::clamp(
-            (adjacentA * adjacentA + adjacentB * adjacentB - opposite * opposite) / denominator,
-            -1.0f,
-            1.0f);
+        const float cosine = std::clamp((adjacentA * adjacentA + adjacentB * adjacentB - opposite * opposite) / denominator, -1.0f, 1.0f);
         angle = std::acos(cosine);
         return std::isfinite(angle);
     }
 
-    bool approximatelyEqual(const RE::NiPoint3& lhs, const RE::NiPoint3& rhs)
+    bool approximatelyEqual(const RE::NiPoint3& lhs, const RE::NiPoint3& rhs) { return MatrixUtils::vec3Len(lhs - rhs) <= kVectorEpsilon; }
+
+    std::optional<bool> queryOpenVrHmdPoseValidity()
     {
-        return MatrixUtils::vec3Len(lhs - rhs) <= kVectorEpsilon;
+        const auto vrSystem = vr::VRSystem();
+        if (!vrSystem) {
+            return std::nullopt;
+        }
+
+        static_assert(vr::k_unTrackedDeviceIndex_Hmd == 0);
+        vr::TrackedDevicePose_t hmdPose{};
+        vrSystem->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0.0f, &hmdPose, 1);
+        return hmdPose.bPoseIsValid;
     }
 
     float frameRateIndependentRetention(const float legacyRetention, const float deltaTime)
@@ -154,7 +227,7 @@ namespace
         // Exponentiation preserves that response at 90 Hz while giving the
         // same time constant at other headset refresh rates.
         const float retention = std::clamp(legacyRetention, 0.0f, 1.0f);
-        return std::pow(retention, std::max(deltaTime, 0.0f) * 90.0f);
+        return std::pow(retention, (std::max)(deltaTime, 0.0f) * 90.0f);
     }
 
     /**
@@ -162,10 +235,7 @@ namespace
      * By setting static body pitch the body position doesn't change, making it easier to handle skeleton
      * related things like Virtual Holsters.
      */
-    bool isComfortSneakHackEnabled()
-    {
-        return frik::g_config.comfortSneakHackStaticBodyPitchAngle > 0 && isComfortSneakMode() && isPlayerSneaking();
-    }
+    bool isComfortSneakHackEnabled() { return frik::g_config.comfortSneakHackStaticBodyPitchAngle > 0 && isComfortSneakMode() && isPlayerSneaking(); }
 }
 
 namespace frik
@@ -241,22 +311,11 @@ namespace frik
 
     void Skeleton::initArmsNodes()
     {
-        const std::vector<std::pair<RE::BSFixedString, RE::NiAVObject**>> armNodes = {
-            { "RArm_Collarbone", &_rightArm.shoulder },
-            { "RArm_UpperArm", &_rightArm.upper },
-            { "RArm_UpperTwist1", &_rightArm.upperT1 },
-            { "RArm_ForeArm1", &_rightArm.forearm1 },
-            { "RArm_ForeArm2", &_rightArm.forearm2 },
-            { "RArm_ForeArm3", &_rightArm.forearm3 },
-            { "RArm_Hand", &_rightArm.hand },
-            { "LArm_Collarbone", &_leftArm.shoulder },
-            { "LArm_UpperArm", &_leftArm.upper },
-            { "LArm_UpperTwist1", &_leftArm.upperT1 },
-            { "LArm_ForeArm1", &_leftArm.forearm1 },
-            { "LArm_ForeArm2", &_leftArm.forearm2 },
-            { "LArm_ForeArm3", &_leftArm.forearm3 },
-            { "LArm_Hand", &_leftArm.hand }
-        };
+        const std::vector<std::pair<RE::BSFixedString, RE::NiAVObject**>> armNodes = { { "RArm_Collarbone", &_rightArm.shoulder }, { "RArm_UpperArm", &_rightArm.upper },
+            { "RArm_UpperTwist1", &_rightArm.upperT1 }, { "RArm_ForeArm1", &_rightArm.forearm1 }, { "RArm_ForeArm2", &_rightArm.forearm2 },
+            { "RArm_ForeArm3", &_rightArm.forearm3 }, { "RArm_Hand", &_rightArm.hand }, { "LArm_Collarbone", &_leftArm.shoulder }, { "LArm_UpperArm", &_leftArm.upper },
+            { "LArm_UpperTwist1", &_leftArm.upperT1 }, { "LArm_ForeArm1", &_leftArm.forearm1 }, { "LArm_ForeArm2", &_leftArm.forearm2 }, { "LArm_ForeArm3", &_leftArm.forearm3 },
+            { "LArm_Hand", &_leftArm.hand } };
         const auto commonNode = getCommonNode();
         for (const auto& [name, node] : armNodes) {
             *node = findAVObject(commonNode, name.c_str());
@@ -321,6 +380,8 @@ namespace frik
         setWandsVisibility(false, true);
         setWandsVisibility(false, false);
 
+        _solveLegsThisFrame = canUseProceduralLegs();
+
         logger::trace("Restore locals of skeleton");
         restoreNodesToDefault();
         updateDownFromRoot();
@@ -342,7 +403,6 @@ namespace frik
         setBodyPosture(neckPitch);
         updateDownFromRoot(); // Do world update now so that IK calculations have proper world reference
 
-        _solveLegsThisFrame = canUseProceduralLegs();
         if (_solveLegsThisFrame) {
             logger::trace("Set knee posture...");
             setKneePos();
@@ -353,8 +413,11 @@ namespace frik
 
         if (_solveLegsThisFrame) {
             logger::trace("Set legs...");
-            setSingleLeg(false);
-            setSingleLeg(true);
+            const auto rightLegSlack = setSingleLeg(false);
+            const auto leftLegSlack = setSingleLeg(true);
+            if (rightLegSlack && leftLegSlack) {
+                BodyAdjustmentSubConfigMode::updateLegSlack(*rightLegSlack, *leftLegSlack);
+            }
         }
 
         // Do another update before setting arms
@@ -378,7 +441,7 @@ namespace frik
 
         // project body out in front of the camera for debug purposes
         logger::trace("Selfie Time");
-        _selfieHandler.onFrameUpdate(_trackedHeadPose.pivot);
+        _selfieHandler.onFrameUpdate(_trackedHeadPose.pivot, _forwardDir);
 
         logger::trace("Operate hands...");
         setHandPose();
@@ -402,13 +465,23 @@ namespace frik
         if (!std::isfinite(_frameTime) || _frameTime <= 0.0f) {
             _frameTime = 1.0f / 90.0f;
         }
-        _frameTime = std::min(_frameTime, 0.1f);
+        _frameTime = (std::min)(_frameTime, 0.1f);
     }
 
     bool Skeleton::sampleTrackedHeadPose()
     {
         RE::NiTransform rawPose;
         bool usedCameraFallback = false;
+
+        const auto openVrPoseValid = queryOpenVrHmdPoseValidity();
+        if (openVrPoseValid && !*openVrPoseValid) {
+            if (_trackingWasValid) {
+                logger::warn("OpenVR reports invalid HMD tracking; retaining the last valid IK pose");
+            }
+            _trackingWasValid = false;
+            resetMotionState();
+            return false;
+        }
 
         if (_playerNodes->HmdNode && isFinite(_playerNodes->HmdNode->world)) {
             rawPose = _playerNodes->HmdNode->world;
@@ -438,10 +511,7 @@ namespace frik
             }
         }
 
-        const RE::NiPoint3 configuredOffset(
-            g_config.hmdPivotOffsetX,
-            g_config.hmdPivotOffsetY,
-            g_config.hmdPivotOffsetZ);
+        const RE::NiPoint3 configuredOffset(g_config.hmdPivotOffsetX, g_config.hmdPivotOffsetY, g_config.hmdPivotOffsetZ);
         bool correctionEnabled = g_config.enableHmdPivotCorrection;
 
         RE::NiPoint3 pivot = rawPose.translate;
@@ -467,12 +537,15 @@ namespace frik
             return false;
         }
 
-        const bool correctionChanged = !_hasLastPivotConfig ||
-            correctionEnabled != _lastPivotCorrectionEnabled ||
-            (correctionEnabled && !approximatelyEqual(configuredOffset, _lastPivotOffset));
+        const bool correctionChanged =
+            !_hasLastPivotConfig || correctionEnabled != _lastPivotCorrectionEnabled || (correctionEnabled && !approximatelyEqual(configuredOffset, _lastPivotOffset));
+        const bool trackingSourceChanged = _hasLastTrackingSource && usedCameraFallback != _lastUsedCameraFallback;
+        const bool trackingScaleChanged = _hasValidTrackedHeadPose && std::abs(rawPose.scale - _trackedHeadPose.raw.scale) > 0.01f;
+        const bool solverCalibrationChanged = _hasLastSolverCalibration &&
+            (std::abs(g_config.calibratedPlayerHeight - _lastCalibratedPlayerHeight) > 0.001f || std::abs(g_config.shoulderWidth - _lastShoulderWidth) > 0.001f ||
+                std::abs(g_config.leftArmLength - _lastLeftArmLength) > 0.001f || std::abs(g_config.rightArmLength - _lastRightArmLength) > 0.001f);
         const bool trackingReacquired = !_trackingWasValid;
-        const bool positionDiscontinuity = _hasValidTrackedHeadPose &&
-            MatrixUtils::vec3Len(pivot - _curentPosition) > kTrackingDiscontinuityDistance;
+        const bool positionDiscontinuity = _hasValidTrackedHeadPose && MatrixUtils::vec3Len(pivot - _curentPosition) > kTrackingDiscontinuityDistance;
 
         _lastPosition = _hasValidTrackedHeadPose ? _curentPosition : pivot;
         _curentPosition = pivot;
@@ -483,10 +556,20 @@ namespace frik
         _lastPivotCorrectionEnabled = correctionEnabled;
         _lastPivotOffset = configuredOffset;
         _hasLastPivotConfig = true;
+        _lastUsedCameraFallback = usedCameraFallback;
+        _hasLastTrackingSource = true;
+        _lastCalibratedPlayerHeight = g_config.calibratedPlayerHeight;
+        _lastShoulderWidth = g_config.shoulderWidth;
+        _lastLeftArmLength = g_config.leftArmLength;
+        _lastRightArmLength = g_config.rightArmLength;
+        _hasLastSolverCalibration = true;
 
-        if (trackingReacquired || correctionChanged || positionDiscontinuity || _timeDiscontinuity) {
+        if (trackingReacquired || correctionChanged || trackingSourceChanged || trackingScaleChanged || solverCalibrationChanged || positionDiscontinuity || _timeDiscontinuity) {
             if (positionDiscontinuity) {
                 logger::sample(3000, "HMD position discontinuity detected; resetting IK motion history");
+            }
+            if (trackingSourceChanged) {
+                logger::sample(3000, "HMD tracking source changed; resetting IK motion history");
             }
             resetMotionState();
         }
@@ -523,48 +606,34 @@ namespace frik
     bool Skeleton::canUseProceduralLegs() const
     {
         const auto player = RE::PlayerCharacter::GetSingleton();
-        const bool legNodesAvailable =
-            _leftLeg.hip && _leftLeg.knee && _leftLeg.foot &&
-            _rightLeg.hip && _rightLeg.knee && _rightLeg.foot;
-        if (!player || !legNodesAvailable ||
-            g_config.isPlayingSeated || g_frik.isPauseMenuOpen()) {
+        const bool legNodesAvailable = _leftLeg.hip && _leftLeg.knee && _leftLeg.foot && _rightLeg.hip && _rightLeg.knee && _rightLeg.foot;
+        if (!player || !legNodesAvailable || g_config.isPlayingSeated || g_frik.isPauseMenuOpen()) {
             return false;
         }
 
-        if (player->IsDead(false) ||
-            static_cast<RE::LIFE_STATE>(player->lifeState) != RE::LIFE_STATE::kAlive ||
-            player->knockState != 0 ||
-            player->DoGetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal ||
-            isJumpingOrInAir() || isSwimming(player) || isUnderwater(player)) {
+        if (player->IsDead(false) || static_cast<RE::LIFE_STATE>(player->lifeState) != RE::LIFE_STATE::kAlive || player->knockState != 0 ||
+            player->DoGetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal || isJumpingOrInAir() || isSwimming(player) || isUnderwater(player)) {
             return false;
         }
 
         const auto playerCamera = getPlayerCamera();
-        if (playerCamera && playerCamera->cameraState) {
-            const auto cameraState = playerCamera->cameraState->stateID;
-            if (cameraState == F4SEVR::PlayerCamera::kCameraState_VATS ||
-                cameraState == F4SEVR::PlayerCamera::kCameraState_Furniture ||
-                cameraState == F4SEVR::PlayerCamera::kCameraState_Horse ||
-                cameraState == F4SEVR::PlayerCamera::kCameraState_Bleedout ||
-                cameraState == F4SEVR::PlayerCamera::kCameraState_Dialogue) {
-                return false;
-            }
+        if (!playerCamera || !playerCamera->cameraState) {
+            return false;
         }
 
-        return true;
+        // Fail closed during scripted/menu/third-person camera transitions.
+        // First-person and iron-sights are the only locomotion-capable VR
+        // states in which procedural foot placement is safe.
+        const auto cameraState = playerCamera->cameraState->stateID;
+        return cameraState == F4SEVR::PlayerCamera::kCameraState_FirstPerson || cameraState == F4SEVR::PlayerCamera::kCameraState_IronSights;
     }
 
     bool Skeleton::hasRequiredNodes() const
     {
         const bool armsAvailable =
-            _leftArm.shoulder && _leftArm.upper && _leftArm.forearm1 && _leftArm.hand &&
-            _rightArm.shoulder && _rightArm.upper && _rightArm.forearm1 && _rightArm.hand;
-        return _root && _root->parent && _playerNodes &&
-            _playerNodes->playerworldnode &&
-            _playerNodes->UprightHmdNode &&
-            _playerNodes->primaryWandNode && _playerNodes->SecondaryWandNode &&
-            _head && _spine && _chest && _com && _neck && _spine1 &&
-            _rightHand && _leftHand && armsAvailable;
+            _leftArm.shoulder && _leftArm.upper && _leftArm.forearm1 && _leftArm.hand && _rightArm.shoulder && _rightArm.upper && _rightArm.forearm1 && _rightArm.hand;
+        return _root && _root->parent && _playerNodes && _playerNodes->playerworldnode && _playerNodes->UprightHmdNode && _playerNodes->primaryWandNode &&
+            _playerNodes->SecondaryWandNode && _head && _spine && _chest && _com && _neck && _spine1 && _rightHand && _leftHand && armsAvailable;
     }
 
     /**
@@ -574,6 +643,11 @@ namespace frik
     void Skeleton::restoreNodesToDefault()
     {
         for (const auto& [boneNode, resetTransform] : _skeletonNodesToDefaultTransforms) {
+            const bool isLegNode = boneNode == _leftLeg.hip || boneNode == _leftLeg.knee || boneNode == _leftLeg.foot || boneNode == _rightLeg.hip || boneNode == _rightLeg.knee ||
+                boneNode == _rightLeg.foot;
+            if (!_solveLegsThisFrame && isLegNode) {
+                continue;
+            }
             boneNode->local = resetTransform;
         }
     }
@@ -605,8 +679,7 @@ namespace frik
         const RE::NiPoint3 hmdToRight = _playerNodes->primaryWandNode->world.translate - _trackedHeadPose.pivot;
         float weight = 1.0f;
 
-        if (!isFinite(hmdToLeft) || !isFinite(hmdToRight) ||
-            MatrixUtils::vec3Len(hmdToLeft) < 10.0f || MatrixUtils::vec3Len(hmdToRight) < 10.0f) {
+        if (!isFinite(hmdToLeft) || !isFinite(hmdToRight) || MatrixUtils::vec3Len(hmdToLeft) < 10.0f || MatrixUtils::vec3Len(hmdToRight) < 10.0f) {
             return _lastNeckYaw;
         }
 
@@ -648,10 +721,7 @@ namespace frik
         const float dot = std::clamp(MatrixUtils::vec3Dot(hmdForward, handForward), -1.0f, 1.0f);
         const float determinant = handForward.x * hmdForward.y - handForward.y * hmdForward.x;
         const float relativeYaw = atan2f(determinant, dot);
-        const float neckYaw = std::clamp(
-            -relativeYaw * weight,
-            MatrixUtils::degreesToRads(-50.0f),
-            MatrixUtils::degreesToRads(50.0f));
+        const float neckYaw = std::clamp(-relativeYaw * weight, MatrixUtils::degreesToRads(-50.0f), MatrixUtils::degreesToRads(50.0f));
 
         if (std::isfinite(neckYaw)) {
             _lastNeckYaw = neckYaw;
@@ -670,8 +740,7 @@ namespace frik
             return 0.0f;
         }
 
-        const float horizontalLength = std::sqrt(
-            lookDirection.x * lookDirection.x + lookDirection.y * lookDirection.y);
+        const float horizontalLength = std::sqrt(lookDirection.x * lookDirection.x + lookDirection.y * lookDirection.y);
         return atan2f(lookDirection.z, horizontalLength);
     }
 
@@ -687,9 +756,19 @@ namespace frik
         // PlayerHeight is a deprecated migration value.  The calibrated
         // measurement participates only in dimensionless solver math and is
         // never applied to the scene graph or weapon hierarchy.
-        const float curHeight = std::max(std::abs(g_config.calibratedPlayerHeight), kVectorEpsilon);
+        const float curHeight = (std::max)(std::abs(g_config.calibratedPlayerHeight), kVectorEpsilon);
+        float neutralPivotLeverZ = 0.0f;
+        if (_lastPivotCorrectionEnabled) {
+            float parentScale = 1.0f;
+            if (_playerNodes && _playerNodes->playerworldnode && std::isfinite(_playerNodes->playerworldnode->world.scale) &&
+                std::abs(_playerNodes->playerworldnode->world.scale) > kVectorEpsilon) {
+                parentScale = _playerNodes->playerworldnode->world.scale;
+            }
+            neutralPivotLeverZ = g_config.hmdPivotOffsetZ * _trackedHeadPose.raw.scale / parentScale;
+        }
+        const float referenceHeight = (std::max)(curHeight - neutralPivotLeverZ, kVectorEpsilon);
         const float correctedHeight = getCorrectedUprightHmdHeight() + getAdjustedPlayerHMDOffset();
-        const float heightCalc = std::clamp(std::abs((curHeight - correctedHeight) / curHeight), 0.0f, 1.0f);
+        const float heightCalc = std::clamp((referenceHeight - correctedHeight) / referenceHeight, 0.0f, 1.0f);
         const float angle = heightCalc * (basePitch + weight * MatrixUtils::radsToDegrees(neckPitch));
         return MatrixUtils::degreesToRads(angle);
     }
@@ -701,15 +780,12 @@ namespace frik
         }
 
         float parentScale = 1.0f;
-        if (_playerNodes->playerworldnode && std::isfinite(_playerNodes->playerworldnode->world.scale) &&
-            std::abs(_playerNodes->playerworldnode->world.scale) > kVectorEpsilon) {
+        if (_playerNodes->playerworldnode && std::isfinite(_playerNodes->playerworldnode->world.scale) && std::abs(_playerNodes->playerworldnode->world.scale) > kVectorEpsilon) {
             parentScale = _playerNodes->playerworldnode->world.scale;
         }
 
-        const RE::NiPoint3 pivotCorrectionWorld =
-            _trackedHeadPose.pivot - _trackedHeadPose.raw.translate;
-        const RE::NiPoint3 pivotCorrectionLocal =
-            _playerNodes->playerworldnode->world.rotate * (pivotCorrectionWorld / parentScale);
+        const RE::NiPoint3 pivotCorrectionWorld = _trackedHeadPose.pivot - _trackedHeadPose.raw.translate;
+        const RE::NiPoint3 pivotCorrectionLocal = _playerNodes->playerworldnode->world.rotate * (pivotCorrectionWorld / parentScale);
         return _playerNodes->UprightHmdNode->local.translate.z + pivotCorrectionLocal.z;
     }
 
@@ -726,8 +802,7 @@ namespace frik
         const float z = _root->local.translate.z;
 
         RE::NiPoint3 planarHmdForward;
-        const RE::NiPoint3 hmdForward =
-            _trackedHeadPose.raw.rotate.Transpose() * RE::NiPoint3(0, 1, 0);
+        const RE::NiPoint3 hmdForward = _trackedHeadPose.raw.rotate.Transpose() * RE::NiPoint3(0, 1, 0);
         if (tryNormalizePlanar(hmdForward, planarHmdForward)) {
             _forwardDir = MatrixUtils::rotateXY(planarHmdForward, neckYaw * 0.7f);
         }
@@ -739,10 +814,14 @@ namespace frik
         body->world.translate.y = _curentPosition.y;
         body->world.translate.z += _playerNodes->playerworldnode->local.translate.z;
 
-        const RE::NiPoint3 back = MatrixUtils::vec3Norm(RE::NiPoint3(_forwardDir.x, _forwardDir.y, 0));
+        const RE::NiPoint3 back = safeNormalize(RE::NiPoint3(_forwardDir.x, _forwardDir.y, 0), RE::NiPoint3(0, 1, 0));
         const auto bodyDir = RE::NiPoint3(0, 1, 0);
 
-        _root->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(back, bodyDir) * body->world.rotate.Transpose();
+        RE::NiMatrix3 bodyFacing;
+        if (!tryGetRotationFromVectors(back, bodyDir, bodyFacing)) {
+            return;
+        }
+        _root->local.rotate = bodyFacing * body->world.rotate.Transpose();
         _root->local.translate = body->world.translate - _curentPosition;
         _root->local.translate.z = z;
         // PlayerHeight scaling is legacy and breaks weapon alignment.  Body
@@ -754,10 +833,7 @@ namespace frik
     void Skeleton::setBodyPosture(const float neckPitch)
     {
         const float requestedBodyPitch = _inPowerArmor ? getBodyPitch(neckPitch) : getBodyPitch(neckPitch) / 1.2f;
-        const float bodyPitch = std::clamp(
-            requestedBodyPitch,
-            MatrixUtils::degreesToRads(-85.0f),
-            MatrixUtils::degreesToRads(85.0f));
+        const float bodyPitch = std::clamp(requestedBodyPitch, MatrixUtils::degreesToRads(-85.0f), MatrixUtils::degreesToRads(85.0f));
 
         if (!_leftLeg.knee || !_rightLeg.knee) {
             return;
@@ -775,21 +851,16 @@ namespace frik
         // Preserve the old approximation only when pivot correction is
         // explicitly disabled.  With correction enabled, the full rotated
         // three-dimensional lever arm replaces both pitch-only offsets.
-        const float legacyForwardOffsetByPitch = !_lastPivotCorrectionEnabled
-            ? fmaxf(0, (isComfortSneakHackEnabled() ? 2.0f : 5.0f) * fabs(neckPitch))
-            : 0.0f;
-        const float legacyVerticalOffsetByPitch = !_lastPivotCorrectionEnabled
-            ? 6.0f * neckPitch
-            : 0.0f;
-        const float playerAdjustZ = (4 * g_config.getPlayerBodyOffsetUp() - g_config.getPlayerHMDOffsetUp() + g_config.getPlayerLegSlackAdjustOffset())
-            * comfortSneakAdjustZ + legacyVerticalOffsetByPitch;
+        const float legacyForwardOffsetByPitch = !_lastPivotCorrectionEnabled ? fmaxf(0, (isComfortSneakHackEnabled() ? 2.0f : 5.0f) * fabs(neckPitch)) : 0.0f;
+        const float legacyVerticalOffsetByPitch = !_lastPivotCorrectionEnabled ? 6.0f * neckPitch : 0.0f;
+        const float playerAdjustZ =
+            (4 * g_config.getPlayerBodyOffsetUp() - g_config.getPlayerHMDOffsetUp() + g_config.getPlayerLegSlackAdjustOffset()) * comfortSneakAdjustZ + legacyVerticalOffsetByPitch;
 
         // In corrected mode the rotated HMD lever arm has already been removed
         // from the pivot, so the former pitch approximations are both zero.
-        const auto neckPos = _curentPosition + RE::NiPoint3(
-            -_forwardDir.x * (g_config.getPlayerBodyOffsetForward() / 2 - legacyForwardOffsetByPitch),
-            -_forwardDir.y * (g_config.getPlayerBodyOffsetForward() / 2 - legacyForwardOffsetByPitch),
-            -playerAdjustZ);
+        const auto neckPos = _curentPosition +
+            RE::NiPoint3(-_forwardDir.x * (g_config.getPlayerBodyOffsetForward() / 2 - legacyForwardOffsetByPitch),
+                -_forwardDir.y * (g_config.getPlayerBodyOffsetForward() / 2 - legacyForwardOffsetByPitch), -playerAdjustZ);
 
         _torsoLen = MatrixUtils::vec3Len(_neck->world.translate - _com->world.translate);
         if (!std::isfinite(_torsoLen) || _torsoLen <= kVectorEpsilon) {
@@ -827,10 +898,10 @@ namespace frik
         // ???
         _root->parent->world.translate.z -= g_config.getPlayerBodyOffsetUp() + getAdjustedPlayerHMDOffset();
 
-        if (MatrixUtils::vec3Len(neckPos - tmpHipPos) > kVectorEpsilon &&
-            MatrixUtils::vec3Len(hmdToHip) > kVectorEpsilon) {
-            const RE::NiMatrix3 mat = MatrixUtils::getMatrixFromRotateVectorVec(neckPos - tmpHipPos, hmdToHip) * _spine1->parent->world.rotate.Transpose();
-            if (isFinite(mat)) {
+        if (MatrixUtils::vec3Len(neckPos - tmpHipPos) > kVectorEpsilon && MatrixUtils::vec3Len(hmdToHip) > kVectorEpsilon) {
+            RE::NiMatrix3 postureRotation;
+            if (tryGetRotationFromVectors(neckPos - tmpHipPos, hmdToHip, postureRotation)) {
+                const RE::NiMatrix3 mat = postureRotation * _spine1->parent->world.rotate.Transpose();
                 _spine1->local.rotate = _spine1->world.rotate * mat;
             }
         }
@@ -838,9 +909,7 @@ namespace frik
 
     void Skeleton::setKneePos()
     {
-        if (!_leftLeg.knee || !_rightLeg.knee ||
-            !isFinite(_leftLeg.knee->world) || !isFinite(_rightLeg.knee->world) ||
-            !isFinite(_leftKneePos) || !isFinite(_rightKneePos)) {
+        if (!_leftLeg.knee || !_rightLeg.knee || !isFinite(_leftLeg.knee->world) || !isFinite(_rightLeg.knee->world) || !isFinite(_leftKneePos) || !isFinite(_rightKneePos)) {
             return;
         }
 
@@ -893,10 +962,8 @@ namespace frik
             return;
         }
 
-        if (!isFinite(_root->world) ||
-            !isFinite(lHip->world) || !isFinite(rHip->world) ||
-            !isFinite(lKnee->world) || !isFinite(rKnee->world) ||
-            !isFinite(lFoot->world) || !isFinite(rFoot->world)) {
+        if (!isFinite(_root->world) || !isFinite(lHip->world) || !isFinite(rHip->world) || !isFinite(lKnee->world) || !isFinite(rKnee->world) || !isFinite(lFoot->world) ||
+            !isFinite(rFoot->world)) {
             resetWalkingState();
             return;
         }
@@ -933,9 +1000,7 @@ namespace frik
         }
 
         // move feet closer together after all motion inputs have validated
-        const RE::NiPoint3 leftToRight = _inPowerArmor
-            ? (rFoot->world.translate - lFoot->world.translate) * -0.15f
-            : (rFoot->world.translate - lFoot->world.translate) * 0.3f;
+        const RE::NiPoint3 leftToRight = _inPowerArmor ? (rFoot->world.translate - lFoot->world.translate) * -0.15f : (rFoot->world.translate - lFoot->world.translate) * 0.3f;
         lFoot->world.translate += leftToRight;
         rFoot->world.translate -= leftToRight;
 
@@ -950,65 +1015,65 @@ namespace frik
 
         // setup current walking state based on velocity and previous state
         switch (_walkingState) {
-            case 0: {
-                if (curSpeed >= 35.0) {
-                    _walkingState = 1; // start walking
-                    _footStepping = std::rand() % 2 + 1; // pick a random foot to take a step  // NOLINT(concurrency-mt-unsafe)
-                    _stepDir = dir;
-                    _stepTimeinStep = stepTime;
-                    _directionChangeDelayRemaining = kDirectionChangeDelaySeconds;
-
-                    if (_footStepping == 1) {
-                        _rightFootTarget = rFoot->world.translate + _stepDir * (curSpeed * stepTime * 1.5f);
-                        _rightFootStart = rFoot->world.translate;
-                        _leftFootTarget = lFoot->world.translate;
-                        _leftFootStart = lFoot->world.translate;
-                        _leftFootPos = _leftFootStart;
-                        _rightFootPos = _rightFootStart;
-                    } else {
-                        _rightFootTarget = rFoot->world.translate;
-                        _rightFootStart = rFoot->world.translate;
-                        _leftFootTarget = lFoot->world.translate + _stepDir * (curSpeed * stepTime * 1.5f);
-                        _leftFootStart = lFoot->world.translate;
-                        _leftFootPos = _leftFootStart;
-                        _rightFootPos = _rightFootStart;
-                    }
-                    _currentStepTime = stepTime / 2;
-                    break;
-                }
-                _currentStepTime = 0.0;
-                _footStepping = 0;
-                _spineAngle = 0.0f;
-                break;
-            }
-            case 1: {
-                if (curSpeed < 20.0) {
-                    _walkingState = 2; // begin process to stop walking
-                    _currentStepTime = 0.0;
-                }
-                break;
-            }
-            case 2: {
-                if (curSpeed >= 20.0) {
-                    _walkingState = 1; // resume walking
-                    _currentStepTime = 0.0;
-                }
-                break;
-            }
-            case 3: {
+        case 0: {
+            if (curSpeed >= 35.0) {
+                _walkingState = 1; // start walking
+                _footStepping = std::rand() % 2 + 1; // pick a random foot to take a step  // NOLINT(concurrency-mt-unsafe)
                 _stepDir = dir;
+                _stepTimeinStep = stepTime;
+                _directionChangeDelayRemaining = kDirectionChangeDelaySeconds;
+
                 if (_footStepping == 1) {
-                    _rightFootTarget = rFoot->world.translate + _stepDir * (curSpeed * stepTime * 0.1f);
+                    _rightFootTarget = rFoot->world.translate + _stepDir * (curSpeed * stepTime * 1.5f);
+                    _rightFootStart = rFoot->world.translate;
+                    _leftFootTarget = lFoot->world.translate;
+                    _leftFootStart = lFoot->world.translate;
+                    _leftFootPos = _leftFootStart;
+                    _rightFootPos = _rightFootStart;
                 } else {
-                    _leftFootTarget = lFoot->world.translate + _stepDir * (curSpeed * stepTime * 0.1f);
+                    _rightFootTarget = rFoot->world.translate;
+                    _rightFootStart = rFoot->world.translate;
+                    _leftFootTarget = lFoot->world.translate + _stepDir * (curSpeed * stepTime * 1.5f);
+                    _leftFootStart = lFoot->world.translate;
+                    _leftFootPos = _leftFootStart;
+                    _rightFootPos = _rightFootStart;
                 }
-                _walkingState = 1;
+                _currentStepTime = stepTime / 2;
                 break;
             }
-            default: {
-                _walkingState = 0;
-                break;
+            _currentStepTime = 0.0;
+            _footStepping = 0;
+            _spineAngle = 0.0f;
+            break;
+        }
+        case 1: {
+            if (curSpeed < 20.0) {
+                _walkingState = 2; // begin process to stop walking
+                _currentStepTime = 0.0;
             }
+            break;
+        }
+        case 2: {
+            if (curSpeed >= 20.0) {
+                _walkingState = 1; // resume walking
+                _currentStepTime = 0.0;
+            }
+            break;
+        }
+        case 3: {
+            _stepDir = dir;
+            if (_footStepping == 1) {
+                _rightFootTarget = rFoot->world.translate + _stepDir * (curSpeed * stepTime * 0.1f);
+            } else {
+                _leftFootTarget = lFoot->world.translate + _stepDir * (curSpeed * stepTime * 0.1f);
+            }
+            _walkingState = 1;
+            break;
+        }
+        default: {
+            _walkingState = 0;
+            break;
+        }
         }
 
         if (_walkingState == 0) {
@@ -1027,9 +1092,8 @@ namespace frik
             RE::NiPoint3 dirOffset = dir - _stepDir;
             const float dot = MatrixUtils::vec3Dot(dir, _stepDir);
             const float scale = (std::min)(curSpeed * stepTime * 1.5f, 140.0f);
-            if (!isFinite(dirOffset) || !std::isfinite(dot) || !std::isfinite(scale) ||
-                !isFinite(_leftFootTarget) || !isFinite(_rightFootTarget) ||
-                !isFinite(_leftFootStart) || !isFinite(_rightFootStart)) {
+            if (!isFinite(dirOffset) || !std::isfinite(dot) || !std::isfinite(scale) || !isFinite(_leftFootTarget) || !isFinite(_rightFootTarget) || !isFinite(_leftFootStart) ||
+                !isFinite(_rightFootStart)) {
                 resetWalkingState();
                 return;
             }
@@ -1048,8 +1112,7 @@ namespace frik
             if (_footStepping == 1) {
                 sign = -1.0f;
                 if (dot < 0.9) {
-                    _directionChangeDelayRemaining =
-                        std::max(0.0f, _directionChangeDelayRemaining - _frameTime);
+                    _directionChangeDelayRemaining = (std::max)(0.0f, _directionChangeDelayRemaining - _frameTime);
                     if (_directionChangeDelayRemaining <= 0.0f) {
                         _rightFootTarget += dirOffset;
                         _stepDir = dir;
@@ -1067,8 +1130,7 @@ namespace frik
                 _rightFootPos.z += up;
             } else {
                 if (dot < 0.9f) {
-                    _directionChangeDelayRemaining =
-                        std::max(0.0f, _directionChangeDelayRemaining - _frameTime);
+                    _directionChangeDelayRemaining = (std::max)(0.0f, _directionChangeDelayRemaining - _frameTime);
                     if (_directionChangeDelayRemaining <= 0.0f) {
                         _leftFootTarget += dirOffset;
                         _stepDir = dir;
@@ -1086,8 +1148,7 @@ namespace frik
                 _leftFootPos.z += up;
             }
 
-            if (!isFinite(_leftFootPos) || !isFinite(_rightFootPos) ||
-                !isFinite(_leftFootTarget) || !isFinite(_rightFootTarget)) {
+            if (!isFinite(_leftFootPos) || !isFinite(_rightFootPos) || !isFinite(_leftFootTarget) || !isFinite(_rightFootTarget)) {
                 resetWalkingState();
                 return;
             }
@@ -1126,31 +1187,28 @@ namespace frik
     }
 
     // adapted solver from VRIK.  Thanks prog!
-    void Skeleton::setSingleLeg(const bool isLeft) const
+    std::optional<float> Skeleton::setSingleLeg(const bool isLeft) const
     {
         const auto leg = isLeft ? _leftLeg : _rightLeg;
         const auto footNode = leg.foot;
         const auto kneeNode = leg.knee;
         const auto hipNode = leg.hip;
-        if (!footNode || !kneeNode || !hipNode || !hipNode->parent ||
-            !isFinite(footNode->local) || !isFinite(footNode->world) ||
-            !isFinite(kneeNode->local) || !isFinite(kneeNode->world) ||
-            !isFinite(hipNode->local) || !isFinite(hipNode->world) ||
-            !isFinite(hipNode->parent->world)) {
-            return;
+        if (!footNode || !kneeNode || !hipNode || !hipNode->parent || !isFinite(footNode->local) || !isFinite(footNode->world) || !isFinite(kneeNode->local) ||
+            !isFinite(kneeNode->world) || !isFinite(hipNode->local) || !isFinite(hipNode->world) || !isFinite(hipNode->parent->world)) {
+            return std::nullopt;
         }
 
         const RE::NiPoint3 footPos = isLeft ? _leftFootPos : _rightFootPos;
         const RE::NiPoint3 hipPos = hipNode->world.translate;
         const RE::NiPoint3 footToHip = hipNode->world.translate - footPos;
         if (!isFinite(footPos) || !isFinite(hipPos) || !isFinite(footToHip)) {
-            return;
+            return std::nullopt;
         }
 
         const float rawFootToHipLength = MatrixUtils::vec3Len(footToHip);
         RE::NiPoint3 xDir;
         if (!std::isfinite(rawFootToHipLength) || !tryNormalize(footToHip, xDir)) {
-            return;
+            return std::nullopt;
         }
 
         auto rotV = RE::NiPoint3(0, 1, 0);
@@ -1160,42 +1218,37 @@ namespace frik
         }
         const RE::NiPoint3 hipDir = hipNode->world.rotate.Transpose() * (rotV);
         RE::NiPoint3 yDir;
-        RE::NiPoint3 projectedBendDirection =
-            hipDir - xDir * MatrixUtils::vec3Dot(hipDir, xDir);
+        RE::NiPoint3 projectedBendDirection = hipDir - xDir * MatrixUtils::vec3Dot(hipDir, xDir);
         if (!tryNormalize(projectedBendDirection, yDir)) {
             // Full extension makes the original pole direction ambiguous.
             // Prefer the body-forward plane, then a stable world axis.
             const RE::NiPoint3 bodyForward(_forwardDir.x, _forwardDir.y, 0.0f);
-            projectedBendDirection =
-                bodyForward - xDir * MatrixUtils::vec3Dot(bodyForward, xDir);
+            projectedBendDirection = bodyForward - xDir * MatrixUtils::vec3Dot(bodyForward, xDir);
             if (!tryNormalize(projectedBendDirection, yDir)) {
-                const RE::NiPoint3 fallbackAxis =
-                    std::abs(xDir.z) < 0.9f ? RE::NiPoint3(0, 0, 1) : RE::NiPoint3(0, 1, 0);
-                projectedBendDirection =
-                    fallbackAxis - xDir * MatrixUtils::vec3Dot(fallbackAxis, xDir);
+                const RE::NiPoint3 fallbackAxis = std::abs(xDir.z) < 0.9f ? RE::NiPoint3(0, 0, 1) : RE::NiPoint3(0, 1, 0);
+                projectedBendDirection = fallbackAxis - xDir * MatrixUtils::vec3Dot(fallbackAxis, xDir);
                 if (!tryNormalize(projectedBendDirection, yDir)) {
-                    return;
+                    return std::nullopt;
                 }
             }
         }
 
         const float thighLenOrig = MatrixUtils::vec3Len(kneeNode->local.translate);
         const float calfLenOrig = MatrixUtils::vec3Len(footNode->local.translate);
-        if (!std::isfinite(thighLenOrig) || !std::isfinite(calfLenOrig) ||
-            thighLenOrig <= kVectorEpsilon || calfLenOrig <= kVectorEpsilon) {
-            return;
+        if (!std::isfinite(thighLenOrig) || !std::isfinite(calfLenOrig) || thighLenOrig <= kVectorEpsilon || calfLenOrig <= kVectorEpsilon) {
+            return std::nullopt;
         }
 
         float thighLen = thighLenOrig;
         float calfLen = calfLenOrig;
 
-        const float ftLen = std::max(rawFootToHipLength, 0.1f);
+        const float ftLen = (std::max)(rawFootToHipLength, 0.1f);
 
         if (ftLen > thighLen + calfLen) {
             const float diff = ftLen - thighLen - calfLen;
             const float combinedLength = calfLen + thighLen;
             if (!std::isfinite(diff) || combinedLength <= kVectorEpsilon) {
-                return;
+                return std::nullopt;
             }
             const float ratio = calfLen / combinedLength;
             calfLen += ratio * diff + 0.1f;
@@ -1206,7 +1259,7 @@ namespace frik
         // floating-point drift at full extension without producing NaNs.
         float footAngle = 0.0f;
         if (!tryLawOfCosinesAngle(calfLen, ftLen, thighLen, footAngle)) {
-            return;
+            return std::nullopt;
         }
 
         // Get the desired world coordinate of the knee
@@ -1214,74 +1267,74 @@ namespace frik
         const float yDist = sinf(footAngle) * calfLen;
         const RE::NiPoint3 kneePos = footPos + xDir * xDist + yDir * yDist;
         if (!std::isfinite(xDist) || !std::isfinite(yDist) || !isFinite(kneePos)) {
-            return;
+            return std::nullopt;
         }
 
         const RE::NiPoint3 pos = kneePos - hipPos;
         RE::NiPoint3 normalizedHipToKnee;
         if (!tryNormalize(pos, normalizedHipToKnee)) {
-            return;
+            return std::nullopt;
         }
-        const RE::NiPoint3 upperLocalDirection =
-            hipNode->world.rotate * normalizedHipToKnee;
-        const RE::NiMatrix3 hipLocalRotate =
-            MatrixUtils::getMatrixFromRotateVectorVec(upperLocalDirection, kneeNode->local.translate) *
-            hipNode->local.rotate;
-        if (!isFinite(upperLocalDirection) || !isFinite(hipLocalRotate)) {
-            return;
+        const RE::NiPoint3 upperLocalDirection = hipNode->world.rotate * normalizedHipToKnee;
+        RE::NiMatrix3 hipSwing;
+        if (!tryGetRotationFromVectors(upperLocalDirection, kneeNode->local.translate, hipSwing)) {
+            return std::nullopt;
+        }
+        const RE::NiMatrix3 hipLocalRotate = hipSwing * hipNode->local.rotate;
+        if (!isNearlyOrthonormal(hipLocalRotate)) {
+            return std::nullopt;
         }
 
         const RE::NiMatrix3 hipWR = hipLocalRotate * hipNode->parent->world.rotate;
         if (!isFinite(hipWR)) {
-            return;
+            return std::nullopt;
         }
 
         const RE::NiMatrix3 baseCalfWR = kneeNode->local.rotate * hipWR;
 
         RE::NiPoint3 normalizedKneeToFoot;
         if (!tryNormalize(footPos - kneePos, normalizedKneeToFoot)) {
-            return;
+            return std::nullopt;
         }
-        const RE::NiPoint3 calfLocalDirection =
-            baseCalfWR * normalizedKneeToFoot;
-        const RE::NiMatrix3 kneeLocalRotate =
-            MatrixUtils::getMatrixFromRotateVectorVec(calfLocalDirection, footNode->local.translate) *
-            kneeNode->local.rotate;
-        if (!isFinite(calfLocalDirection) || !isFinite(kneeLocalRotate)) {
-            return;
+        const RE::NiPoint3 calfLocalDirection = baseCalfWR * normalizedKneeToFoot;
+        RE::NiMatrix3 kneeSwing;
+        if (!tryGetRotationFromVectors(calfLocalDirection, footNode->local.translate, kneeSwing)) {
+            return std::nullopt;
+        }
+        const RE::NiMatrix3 kneeLocalRotate = kneeSwing * kneeNode->local.rotate;
+        if (!isNearlyOrthonormal(kneeLocalRotate)) {
+            return std::nullopt;
         }
 
         const RE::NiMatrix3 calfWR = kneeLocalRotate * hipWR;
         if (!isFinite(calfWR)) {
-            return;
+            return std::nullopt;
         }
 
         // Calculate Clp:  Cwp = Twp + Twr * (Clp * Tws) = kneePos   ===>   Clp = Twr' * (kneePos - Twp) / Tws
-        RE::NiPoint3 kneeLocalTranslate =
-            hipWR * ((kneePos - hipPos) / hipNode->world.scale);
+        RE::NiPoint3 kneeLocalTranslate = hipWR * ((kneePos - hipPos) / hipNode->world.scale);
         const float computedThighLength = MatrixUtils::vec3Len(kneeLocalTranslate);
         if (!isFinite(kneeLocalTranslate) || !std::isfinite(computedThighLength)) {
-            return;
+            return std::nullopt;
         }
         if (computedThighLength > thighLenOrig) {
             RE::NiPoint3 normalizedKneeLocal;
             if (!tryNormalize(kneeLocalTranslate, normalizedKneeLocal)) {
-                return;
+                return std::nullopt;
             }
             kneeLocalTranslate = normalizedKneeLocal * thighLenOrig;
         }
 
         // Calculate Flp:  Fwp = Cwp + Cwr * (Flp * Cws) = footPos   ===>   Flp = Cwr' * (footPos - Cwp) / Cws
-        RE::NiPoint3 footLocalTranslate =
-            calfWR * ((footPos - kneePos) / kneeNode->world.scale);
+        RE::NiPoint3 footLocalTranslate = calfWR * ((footPos - kneePos) / kneeNode->world.scale);
         const float computedCalfLength = MatrixUtils::vec3Len(footLocalTranslate);
         if (!isFinite(footLocalTranslate) || !std::isfinite(computedCalfLength)) {
-            return;
+            return std::nullopt;
         }
         if (computedCalfLength > calfLenOrig) {
             RE::NiPoint3 normalizedFootLocal;
             if (!tryNormalize(footLocalTranslate, normalizedFootLocal)) {
-                return;
+                return std::nullopt;
             }
             footLocalTranslate = normalizedFootLocal * calfLenOrig;
         }
@@ -1292,7 +1345,7 @@ namespace frik
         kneeNode->local.translate = kneeLocalTranslate;
         footNode->local.translate = footLocalTranslate;
 
-        BodyAdjustmentSubConfigMode::updateLegSlack((thighLenOrig + calfLenOrig) - ftLen);
+        return (thighLenOrig + calfLenOrig) - ftLen;
     }
 
     void Skeleton::rotateLeg(const uint32_t pos, const float angle) const
@@ -1451,8 +1504,7 @@ namespace frik
         }
 
         const auto arm = isLeft ? _leftArm : _rightArm;
-        if (!arm.shoulder || !arm.upper || !arm.forearm1 || !arm.hand ||
-            (!_inPowerArmor && (!arm.forearm2 || !arm.forearm3))) {
+        if (!arm.shoulder || !arm.upper || !arm.forearm1 || !arm.hand || (!_inPowerArmor && (!arm.forearm2 || !arm.forearm3))) {
             logger::sample("Cannot solve {} arm: required skeleton nodes are missing", isLeft ? "left" : "right");
             continuity = {};
             return;
@@ -1481,19 +1533,16 @@ namespace frik
             updateTransforms(_playerNodes->SecondaryMeleeWeaponOffsetNode2);
         }
 
-        weaponNode->local.rotate = !isLeftHandedMode()
-            ? MatrixUtils::getMatrix(-0.122f, 0.987f, 0.100f, 0.990f, 0.114f, 0.081f, 0.069f, 0.109f, -0.992f)
-            : MatrixUtils::getMatrix(-0.122f, 0.987f, 0.100f, -0.990f, -0.114f, -0.081f, -0.069f, -0.109f, 0.992f);
+        weaponNode->local.rotate = !isLeftHandedMode() ? MatrixUtils::getMatrix(-0.122f, 0.987f, 0.100f, 0.990f, 0.114f, 0.081f, 0.069f, 0.109f, -0.992f)
+                                                       : MatrixUtils::getMatrix(-0.122f, 0.987f, 0.100f, -0.990f, -0.114f, -0.081f, -0.069f, -0.109f, 0.992f);
 
         if (handleOffhand) {
             weaponNode->local.rotate = weaponNode->local.rotate * MatrixUtils::getMatrixFromEulerAngles(0, MatrixUtils::degreesToRads(isLeft ? 45.0f : -45.0f), 0);
         }
 
-        weaponNode->local.translate = isLeftHandedMode()
-            ? (isLeft ? RE::NiPoint3(3.389f, -2.099f, 3.133f) : RE::NiPoint3(0, -4.8f, 0))
-            : isLeft
-            ? RE::NiPoint3(0, 0, 0)
-            : RE::NiPoint3(4.389f, -1.899f, -3.133f);
+        weaponNode->local.translate = isLeftHandedMode() ? (isLeft ? RE::NiPoint3(3.389f, -2.099f, 3.133f) : RE::NiPoint3(0, -4.8f, 0))
+            : isLeft                                     ? RE::NiPoint3(0, 0, 0)
+                                                         : RE::NiPoint3(4.389f, -1.899f, -3.133f);
 
         dampenHand(offsetNode, isLeft);
 
@@ -1505,28 +1554,44 @@ namespace frik
 
         // Detect if the 1st person hand position is invalid. This can happen when a controller loses tracking.
         // If it is, do not handle IK and let Fallout use its normal animations for that arm instead.
-        if (!isFinite(handPos) || !isFinite(handRot) ||
-            MatrixUtils::vec3Len(arm.upper->world.translate - handPos) > 200.0) {
+        if (!isFinite(handPos) || !isFinite(handRot) || MatrixUtils::vec3Len(arm.upper->world.translate - handPos) > 200.0) {
             continuity = {};
             return;
         }
+
+        // Any failure below restores the complete arm chain. The tracked
+        // weapon/controller nodes are deliberately outside this transaction.
+        const auto shoulderLocalBefore = arm.shoulder->local;
+        const auto upperLocalBefore = arm.upper->local;
+        const auto forearm1LocalBefore = arm.forearm1->local;
+        const auto forearm2LocalBefore = arm.forearm2 ? arm.forearm2->local : arm.forearm1->local;
+        const auto forearm3LocalBefore = arm.forearm3 ? arm.forearm3->local : arm.forearm1->local;
+        const auto handLocalBefore = arm.hand->local;
+        ScopeExit poseRollback([&]() {
+            arm.shoulder->local = shoulderLocalBefore;
+            arm.upper->local = upperLocalBefore;
+            arm.forearm1->local = forearm1LocalBefore;
+            if (arm.forearm2) {
+                arm.forearm2->local = forearm2LocalBefore;
+            }
+            if (arm.forearm3) {
+                arm.forearm3->local = forearm3LocalBefore;
+            }
+            arm.hand->local = handLocalBefore;
+            continuity = {};
+            updateDown(arm.shoulder, true);
+        });
 
         // Calibrated dimensions are solver-only.  Scaling these individual
         // bone offsets does not touch the actor root or weapon hierarchy.
         constexpr float referenceArmLength = 36.74f;
         float calibratedArmLength = isLeft ? g_config.leftArmLength : g_config.rightArmLength;
         if (!std::isfinite(calibratedArmLength) || calibratedArmLength <= 1.0f) {
-            calibratedArmLength =
-                std::isfinite(g_config.armLength) && g_config.armLength > 1.0f
-                ? g_config.armLength
-                : referenceArmLength;
+            calibratedArmLength = std::isfinite(g_config.armLength) && g_config.armLength > 1.0f ? g_config.armLength : referenceArmLength;
         }
         const float adjustedArmLength = calibratedArmLength / referenceArmLength;
 
-        const float shoulderWidthScale = std::clamp(
-            g_config.shoulderWidth / DEFAULT_SHOULDER_WIDTH,
-            0.65f,
-            1.50f);
+        const float shoulderWidthScale = std::clamp(g_config.shoulderWidth, 15.0f, 70.0f) / DEFAULT_SHOULDER_WIDTH;
         if (!std::isfinite(shoulderWidthScale) || !isFinite(arm.upper->local.translate)) {
             continuity = {};
             return;
@@ -1535,10 +1600,9 @@ namespace frik
         updateDown(arm.shoulder, true);
 
         const float originalUpperLen = MatrixUtils::vec3Len(arm.forearm1->local.translate);
-        const float originalForearmLen = _inPowerArmor ?
-            MatrixUtils::vec3Len(arm.hand->local.translate) :
-            MatrixUtils::vec3Len(arm.hand->local.translate) + MatrixUtils::vec3Len(arm.forearm2->local.translate) +
-                MatrixUtils::vec3Len(arm.forearm3->local.translate);
+        const float originalForearmLen = _inPowerArmor
+            ? MatrixUtils::vec3Len(arm.hand->local.translate)
+            : MatrixUtils::vec3Len(arm.hand->local.translate) + MatrixUtils::vec3Len(arm.forearm2->local.translate) + MatrixUtils::vec3Len(arm.forearm3->local.translate);
         const float restArmLength = (originalUpperLen + originalForearmLen) * adjustedArmLength;
         if (!std::isfinite(restArmLength) || restArmLength <= 0.01f) {
             continuity = {};
@@ -1561,7 +1625,11 @@ namespace frik
         RE::NiPoint3 sLocalDir = arm.shoulder->world.rotate * (clavicalToNewShoulder / arm.shoulder->world.scale);
 
         if (ik::length(toIKVector(sLocalDir)) > 0.0001f) {
-            arm.shoulder->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(sLocalDir, RE::NiPoint3(1, 0, 0)) * arm.shoulder->local.rotate;
+            RE::NiMatrix3 shoulderRotation;
+            if (!tryGetRotationFromVectors(sLocalDir, RE::NiPoint3(1, 0, 0), shoulderRotation)) {
+                return;
+            }
+            arm.shoulder->local.rotate = shoulderRotation * arm.shoulder->local.rotate;
         }
 
         updateDown(arm.shoulder, true);
@@ -1573,8 +1641,7 @@ namespace frik
         RE::NiPoint3 handSide = handRot.Transpose() * (RE::NiPoint3(0, -1, 0));
         RE::NiPoint3 handInSide = handSide * negLeft;
         const RE::NiPoint3 Uwp = arm.upper->world.translate;
-        const ik::ArmSolveInput solveInput{
-            .shoulder = toIKVector(Uwp),
+        const ik::ArmSolveInput solveInput{ .shoulder = toIKVector(Uwp),
             .hand = toIKVector(handPos),
             .bodyForward = toIKVector(forwardDir),
             .bodyOutward = toIKVector(sidewaysDir),
@@ -1583,9 +1650,9 @@ namespace frik
             .handSide = toIKVector(safeNormalize(handInSide, sidewaysDir)),
             .upperLength = originalUpperLen * adjustedArmLength,
             .lowerLength = originalForearmLen * adjustedArmLength,
-            .deltaTime = _frameTime
-        };
-        const auto solve = ik::solveArm(solveInput, continuity);
+            .deltaTime = _frameTime };
+        auto candidateContinuity = continuity;
+        const auto solve = ik::solveArm(solveInput, candidateContinuity);
         if (!solve.valid) {
             continuity = {};
             return;
@@ -1593,7 +1660,6 @@ namespace frik
 
         const float forearmLen = solve.lowerLength;
         const RE::NiPoint3 elbowWorld = toNiPoint(solve.elbow);
-        const RE::NiPoint3 solvedHandPos = Uwp + safeNormalize(handPos - Uwp) * solve.solvedReach;
 
         // This code below rotates and positions the upper arm, forearm, and hand bones
         // Notation: C=Clavicle, U=Upper arm, F=Forearm, H=hand   w=world, l=local   p=position, r=rotation, s=scale
@@ -1610,36 +1676,25 @@ namespace frik
         }
         RE::NiPoint3 uLocalDir = Uwr * (safeNormalize(pos) / arm.upper->world.scale);
 
-        arm.upper->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(uLocalDir, arm.forearm1->local.translate) * arm.upper->local.rotate;
-
-        Uwr = arm.upper->local.rotate * arm.shoulder->world.rotate;
-
-        // Find the angle of the forearm twisted around the upper arm and twist the upper arm to align it
-        //    Uwr * twist = Cwr * Ulr   ===>   Ulr = Cwr' * Uwr * twist
-        pos = solvedHandPos - elbowWorld;
-        RE::NiPoint3 uLocalTwist = Uwr * safeNormalize(pos);
-        uLocalTwist.x = 0;
-        RE::NiPoint3 upperSide = arm.upper->world.rotate.Transpose() * (RE::NiPoint3(0, 1, 0));
-        RE::NiPoint3 uloc = arm.shoulder->world.rotate * (upperSide);
-        uloc.x = 0;
-        float upperAngle = 0.0f;
-        if (ik::length(toIKVector(uLocalTwist)) > 0.0001f && ik::length(toIKVector(uloc)) > 0.0001f) {
-            upperAngle = ik::safeAcos(MatrixUtils::vec3Dot(safeNormalize(uLocalTwist), safeNormalize(uloc))) * (uLocalTwist.z > 0 ? 1.f : -1.f);
+        RE::NiMatrix3 upperSwing;
+        if (!tryGetRotationFromVectors(uLocalDir, arm.forearm1->local.translate, upperSwing)) {
+            return;
         }
-
-        arm.upper->local.rotate = MatrixUtils::getMatrixFromEulerAngles(-upperAngle, 0, 0) * arm.upper->local.rotate;
+        arm.upper->local.rotate = upperSwing * arm.upper->local.rotate;
 
         Uwr = arm.upper->local.rotate * arm.shoulder->world.rotate;
-
-        arm.forearm1->local.rotate = MatrixUtils::getMatrixFromEulerAngles(-upperAngle, 0, 0) * arm.forearm1->local.rotate;
 
         // The forearm arm bone must be rotated from its forward vector to its elbow-to-hand vector in its local space
         // Calculate Flr:  Fwr * rotTowardHand = Uwr * Flr   ===>   Flr = Uwr' * Fwr * rotTowardHand
         RE::NiMatrix3 Fwr = arm.forearm1->local.rotate * Uwr;
-        RE::NiPoint3 elbowHand = solvedHandPos - elbowWorld;
+        RE::NiPoint3 elbowHand = handPos - elbowWorld;
         RE::NiPoint3 fLocalDir = Fwr * safeNormalize(elbowHand);
 
-        arm.forearm1->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(fLocalDir, RE::NiPoint3(1, 0, 0)) * arm.forearm1->local.rotate;
+        RE::NiMatrix3 forearmSwing;
+        if (!tryGetRotationFromVectors(fLocalDir, RE::NiPoint3(1, 0, 0), forearmSwing)) {
+            return;
+        }
+        arm.forearm1->local.rotate = forearmSwing * arm.forearm1->local.rotate;
         Fwr = arm.forearm1->local.rotate * Uwr;
 
         RE::NiMatrix3 Fwr3;
@@ -1676,17 +1731,44 @@ namespace frik
         // Calculate Flp:  Fwp = Uwp + Uwr * (Flp * Uws) = elbowWorld   ===>   Flp = Uwr' * (elbowWorld - Uwp) / Uws
         arm.forearm1->local.translate = Uwr * ((elbowWorld - Uwp) / arm.upper->world.scale);
 
-        float origEHLen = MatrixUtils::vec3Len(arm.hand->world.translate - arm.forearm1->world.translate);
-        if (!std::isfinite(origEHLen) || origEHLen <= 0.0001f) {
+        const float forearmRatio = forearmLen / originalForearmLen;
+        if (!std::isfinite(forearmRatio) || forearmRatio <= 0.0f || forearmRatio > 3.0f) {
             return;
         }
-        float forearmRatio = forearmLen / origEHLen * _root->local.scale;
 
         if (arm.forearm2 && !_inPowerArmor) {
             arm.forearm2->local.translate *= forearmRatio;
             arm.forearm3->local.translate *= forearmRatio;
         }
         arm.hand->local.translate *= forearmRatio;
+
+        const bool localPoseValid = isFinite(arm.shoulder->local) && isNearlyOrthonormal(arm.shoulder->local.rotate) && isFinite(arm.upper->local) &&
+            isNearlyOrthonormal(arm.upper->local.rotate) && isFinite(arm.forearm1->local) && isNearlyOrthonormal(arm.forearm1->local.rotate) && isFinite(arm.hand->local) &&
+            isNearlyOrthonormal(arm.hand->local.rotate) && (!arm.forearm2 || (isFinite(arm.forearm2->local) && isNearlyOrthonormal(arm.forearm2->local.rotate))) &&
+            (!arm.forearm3 || (isFinite(arm.forearm3->local) && isNearlyOrthonormal(arm.forearm3->local.rotate)));
+        if (!localPoseValid) {
+            logger::sample("Rejected {} arm IK pose: invalid candidate local transform", isLeft ? "left" : "right");
+            return;
+        }
+
+        updateDown(arm.shoulder, true);
+        const float handPositionResidual = MatrixUtils::vec3Len(arm.hand->world.translate - handPos);
+        const float elbowPositionResidual = MatrixUtils::vec3Len(arm.forearm1->world.translate - elbowWorld);
+        const float handRotationResidual = maximumMatrixDifference(arm.hand->world.rotate, handRot);
+        const bool worldPoseValid = isFinite(arm.shoulder->world) && isNearlyOrthonormal(arm.shoulder->world.rotate) && isFinite(arm.upper->world) &&
+            isNearlyOrthonormal(arm.upper->world.rotate) && isFinite(arm.forearm1->world) && isNearlyOrthonormal(arm.forearm1->world.rotate) &&
+            (!arm.forearm2 || (isFinite(arm.forearm2->world) && isNearlyOrthonormal(arm.forearm2->world.rotate))) &&
+            (!arm.forearm3 || (isFinite(arm.forearm3->world) && isNearlyOrthonormal(arm.forearm3->world.rotate))) && isFinite(arm.hand->world) &&
+            isNearlyOrthonormal(arm.hand->world.rotate) && std::isfinite(handPositionResidual) && handPositionResidual <= 1.0f && std::isfinite(elbowPositionResidual) &&
+            elbowPositionResidual <= 0.25f && std::isfinite(handRotationResidual) && handRotationResidual <= 0.03f;
+        if (!worldPoseValid) {
+            logger::sample("Rejected {} arm IK pose: world validation failed (hand pos {:.3f}, elbow pos {:.3f}, hand rot {:.3f})", isLeft ? "left" : "right", handPositionResidual,
+                elbowPositionResidual, handRotationResidual);
+            return;
+        }
+
+        continuity = candidateContinuity;
+        poseRollback.release();
     }
 
     void Skeleton::hideHands() const
@@ -1736,7 +1818,7 @@ namespace frik
         }
 
         qc.fromMatrix(_handBones[bone].rotate);
-        const float blend = std::clamp(_frameTime * 7, -1.0f, 2.0f);
+        const float blend = ik::smoothingAlpha(_frameTime, 1.0f / 7.0f);
         qc.slerp(blend, qt);
         _handBones[bone].rotate = qc.getMatrix();
     }
@@ -1779,19 +1861,15 @@ namespace frik
             auto found = _fingerRelations.find(name);
             if (found != _fingerRelations.end()) {
                 const bool isLeft = name[0] == 'L';
-                const uint64_t reg = isLeft
-                    ? VRControllers.getControllerState_DEPRECATED(TrackerType::Left).ulButtonTouched
-                    : VRControllers.getControllerState_DEPRECATED(TrackerType::Right).ulButtonTouched;
-                const float gripProx = isLeft
-                    ? VRControllers.getControllerState_DEPRECATED(TrackerType::Left).rAxis[2].x
-                    : VRControllers.getControllerState_DEPRECATED(TrackerType::Right).rAxis[2].x;
-                const bool thumbUp = reg & ButtonMaskFromId(k_EButton_Grip)
-                    && reg & ButtonMaskFromId(k_EButton_SteamVR_Trigger)
-                    && !(reg & ButtonMaskFromId(k_EButton_SteamVR_Touchpad));
+                const uint64_t reg = isLeft ? VRControllers.getControllerState_DEPRECATED(TrackerType::Left).ulButtonTouched
+                                            : VRControllers.getControllerState_DEPRECATED(TrackerType::Right).ulButtonTouched;
+                const float gripProx =
+                    isLeft ? VRControllers.getControllerState_DEPRECATED(TrackerType::Left).rAxis[2].x : VRControllers.getControllerState_DEPRECATED(TrackerType::Right).rAxis[2].x;
+                const bool thumbUp =
+                    reg & ButtonMaskFromId(k_EButton_Grip) && reg & ButtonMaskFromId(k_EButton_SteamVR_Trigger) && !(reg & ButtonMaskFromId(k_EButton_SteamVR_Touchpad));
                 _closedHand[name] = reg & ButtonMaskFromId(_handBonesButton.at(name));
 
-                if (IsWeaponDrawn()
-                    && (isLeftHandedMode() || !g_frik.isPipboyOperatingWithFinger()) // left-handed has pipboy on the hand with the weapon
+                if (IsWeaponDrawn() && (isLeftHandedMode() || !g_frik.isPipboyOperatingWithFinger()) // left-handed has pipboy on the hand with the weapon
                     && !(isLeft ^ isLeftHandedMode())) {
                     if (isLeftHandedMode()) {
                         setPredefinedHandPose(name);
@@ -1864,12 +1942,9 @@ namespace frik
         }
 
         const RE::NiTransform currentFrame = node->world;
-        const float rotationRetention = frameRateIndependentRetention(
-            isInScopeMenu ? g_config.dampenHandsRotationInVanillaScope : g_config.dampenHandsRotation,
-            _frameTime);
-        const float translationRetention = frameRateIndependentRetention(
-            isInScopeMenu ? g_config.dampenHandsTranslationInVanillaScope : g_config.dampenHandsTranslation,
-            _frameTime);
+        const float rotationRetention = frameRateIndependentRetention(isInScopeMenu ? g_config.dampenHandsRotationInVanillaScope : g_config.dampenHandsRotation, _frameTime);
+        const float translationRetention =
+            frameRateIndependentRetention(isInScopeMenu ? g_config.dampenHandsTranslationInVanillaScope : g_config.dampenHandsTranslation, _frameTime);
 
         // Spherical interpolation between previous frame and current frame for the world rotation matrix
         Quaternion rq, rt;
@@ -1911,32 +1986,30 @@ namespace frik
             { "COM", MatrixUtils::getTransform(0.0f, 0.0f, 68.91130f, 0.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f) },
             { "Pelvis", MatrixUtils::getTransform(0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "LLeg_Thigh",
-              MatrixUtils::getTransform(0.0f, 0.00040f, 6.61510f, -0.99112f, -0.00017f, -0.13297f, -0.03860f, 0.95730f, 0.28650f, 0.12725f, 0.28909f, -0.94881f, 1.0f) },
+                MatrixUtils::getTransform(0.0f, 0.00040f, 6.61510f, -0.99112f, -0.00017f, -0.13297f, -0.03860f, 0.95730f, 0.28650f, 0.12725f, 0.28909f, -0.94881f, 1.0f) },
             { "LLeg_Calf", MatrixUtils::getTransform(31.59520f, 0.0f, 0.0f, 0.99210f, 0.12266f, -0.02618f, -0.12266f, 0.99245f, 0.00159f, 0.02617f, 0.00164f, 0.99966f, 1.0f) },
             { "LLeg_Foot", MatrixUtils::getTransform(31.94290f, 0.0f, 0.0f, 0.45330f, -0.88555f, -0.10159f, 0.88798f, 0.45855f, -0.03499f, 0.07757f, -0.07435f, 0.99421f, 1.0f) },
             { "RLeg_Thigh",
-              MatrixUtils::getTransform(0.0f, 0.00040f, -6.61510f, -0.99307f, 0.00520f, 0.11741f, -0.02903f, 0.95721f, -0.28795f, -0.11389f, -0.28936f, -0.95042f, 1.0f) },
+                MatrixUtils::getTransform(0.0f, 0.00040f, -6.61510f, -0.99307f, 0.00520f, 0.11741f, -0.02903f, 0.95721f, -0.28795f, -0.11389f, -0.28936f, -0.95042f, 1.0f) },
             { "RLeg_Calf", MatrixUtils::getTransform(31.59510f, 0.0f, 0.0f, 0.99108f, 0.13329f, 0.00011f, -0.13329f, 0.99108f, 0.00139f, 0.00007f, -0.00140f, 1.0f, 1.0f) },
             { "RLeg_Foot", MatrixUtils::getTransform(31.94260f, 0.0f, 0.0f, 0.44741f, -0.88731f, 0.11181f, 0.89061f, 0.45344f, 0.03463f, -0.08143f, 0.08409f, 0.99313f, 1.0f) },
             { "SPINE1", MatrixUtils::getTransform(3.792f, -0.00290f, 0.0f, 0.99246f, -0.12254f, 0.0f, 0.12254f, 0.99246f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "SPINE2", MatrixUtils::getTransform(8.70470f, 0.0f, 0.0f, 0.98463f, 0.17464f, 0.0f, -0.17464f, 0.98463f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "Chest", MatrixUtils::getTransform(9.95630f, 0.0f, 0.0f, 0.99983f, -0.01837f, 0.0f, 0.01837f, 0.99983f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "LArm_Collarbone",
-              MatrixUtils::getTransform(19.15320f, -0.51040f, 1.69510f, -0.40489f, -0.00599f, -0.91434f, -0.26408f, 0.95813f, 0.11066f, 0.87540f, 0.28627f, -0.38952f, 1.0f) },
+                MatrixUtils::getTransform(19.15320f, -0.51040f, 1.69510f, -0.40489f, -0.00599f, -0.91434f, -0.26408f, 0.95813f, 0.11066f, 0.87540f, 0.28627f, -0.38952f, 1.0f) },
             { "LArm_UpperArm",
-              MatrixUtils::getTransform(12.53660f, 0.0f, 0.0f, 0.91617f, -0.25279f, -0.31102f, 0.25328f, 0.96658f, -0.03954f, 0.31062f, -0.04255f, 0.94958f, 1.0f) },
+                MatrixUtils::getTransform(12.53660f, 0.0f, 0.0f, 0.91617f, -0.25279f, -0.31102f, 0.25328f, 0.96658f, -0.03954f, 0.31062f, -0.04255f, 0.94958f, 1.0f) },
             { "LArm_ForeArm1",
-              MatrixUtils::getTransform(17.96830f, 0.0f, 0.0f, 0.85511f, -0.51462f, -0.06284f, 0.51548f, 0.85690f, -0.00289f, 0.05534f, -0.02992f, 0.99802f, 1.0f) },
+                MatrixUtils::getTransform(17.96830f, 0.0f, 0.0f, 0.85511f, -0.51462f, -0.06284f, 0.51548f, 0.85690f, -0.00289f, 0.05534f, -0.02992f, 0.99802f, 1.0f) },
             { "LArm_ForeArm2", MatrixUtils::getTransform(6.15160f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.99999f, -0.00536f, 0.0f, 0.00536f, 0.99999f, 1.0f) },
             { "LArm_ForeArm3", MatrixUtils::getTransform(6.15160f, -0.00010f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.99999f, -0.00536f, 0.0f, 0.00536f, 0.99999f, 1.0f) },
             { "LArm_Hand", MatrixUtils::getTransform(6.15160f, 0.0f, -0.00010f, 0.98845f, 0.14557f, -0.04214f, 0.04136f, 0.00839f, 0.99911f, 0.14579f, -0.98931f, 0.00227f, 1.0f) },
-            {
-                "RArm_Collarbone",
-                MatrixUtils::getTransform(19.15320f, -0.51040f, -1.69510f, -0.40497f, -0.00602f, 0.91431f, -0.26413f, 0.95811f, -0.11069f, -0.87535f, -0.28632f, -0.38960f, 1.0f)
-            },
+            { "RArm_Collarbone",
+                MatrixUtils::getTransform(19.15320f, -0.51040f, -1.69510f, -0.40497f, -0.00602f, 0.91431f, -0.26413f, 0.95811f, -0.11069f, -0.87535f, -0.28632f, -0.38960f, 1.0f) },
             { "RArm_UpperArm", MatrixUtils::getTransform(12.53430f, 0.0f, 0.0f, 0.91620f, -0.25314f, 0.31064f, 0.25365f, 0.96649f, 0.03947f, -0.31022f, 0.04263f, 0.94971f, 1.0f) },
             { "RArm_ForeArm1",
-              MatrixUtils::getTransform(17.97050f, 0.00010f, -0.00010f, 0.85532f, -0.51419f, 0.06360f, 0.51507f, 0.85714f, 0.00288f, -0.05599f, 0.03030f, 0.99797f, 1.0f) },
+                MatrixUtils::getTransform(17.97050f, 0.00010f, -0.00010f, 0.85532f, -0.51419f, 0.06360f, 0.51507f, 0.85714f, 0.00288f, -0.05599f, 0.03030f, 0.99797f, 1.0f) },
             { "RArm_ForeArm2", MatrixUtils::getTransform(6.15280f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.99999f, 0.00536f, 0.0f, -0.00536f, 0.99999f, 1.0f) },
             { "RArm_ForeArm3", MatrixUtils::getTransform(6.15290f, 0.0f, -0.00010f, 1.0f, 0.0f, 0.0f, 0.0f, 0.99999f, 0.00536f, 0.0f, -0.00536f, 0.99999f, 1.0f) },
             { "RArm_Hand", MatrixUtils::getTransform(6.15290f, 0.0f, 0.0f, 0.98845f, 0.14557f, 0.04214f, 0.04136f, 0.00839f, -0.99911f, -0.14579f, 0.98931f, 0.00227f, 1.0f) },
@@ -1953,36 +2026,36 @@ namespace frik
             { "COM", MatrixUtils::getTransform(0.0f, -3.74980f, 89.41950f, 0.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f) },
             { "Pelvis", MatrixUtils::getTransform(0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "LLeg_Thigh",
-              MatrixUtils::getTransform(4.54870f, -1.33f, 6.90830f, -0.98736f, 0.14491f, 0.06416f, 0.06766f, 0.01940f, 0.99752f, 0.14331f, 0.98925f, -0.02896f, 1.0f) },
+                MatrixUtils::getTransform(4.54870f, -1.33f, 6.90830f, -0.98736f, 0.14491f, 0.06416f, 0.06766f, 0.01940f, 0.99752f, 0.14331f, 0.98925f, -0.02896f, 1.0f) },
             { "LLeg_Calf", MatrixUtils::getTransform(34.298f, 0.0f, 0.0f, 0.99681f, -0.00145f, 0.07983f, 0.00170f, 0.99999f, -0.00305f, -0.07982f, 0.00318f, 0.99680f, 1.0f) },
             { "LLeg_Foot", MatrixUtils::getTransform(52.54120f, 0.0f, 0.0f, 0.63109f, -0.76168f, -0.14685f, -0.07775f, 0.12624f, -0.98895f, 0.77180f, 0.63554f, 0.02045f, 1.0f) },
             { "RLeg_Thigh",
-              MatrixUtils::getTransform(4.54760f, -1.32430f, -6.898f, -0.98732f, 0.14533f, -0.06381f, 0.06732f, 0.01938f, -0.99754f, -0.14374f, -0.98919f, -0.02892f, 1.0f) },
+                MatrixUtils::getTransform(4.54760f, -1.32430f, -6.898f, -0.98732f, 0.14533f, -0.06381f, 0.06732f, 0.01938f, -0.99754f, -0.14374f, -0.98919f, -0.02892f, 1.0f) },
             { "RLeg_Calf", MatrixUtils::getTransform(34.29790f, 0.0f, 0.0f, 0.99684f, -0.00096f, -0.07937f, 0.00120f, 0.99999f, 0.00307f, 0.07937f, -0.00316f, 0.99684f, 1.0f) },
             { "RLeg_Foot", MatrixUtils::getTransform(52.54080f, 0.0f, 0.0f, 0.63118f, -0.76162f, 0.14677f, -0.07771f, 0.12618f, 0.98896f, -0.77173f, -0.63562f, 0.02046f, 1.0f) },
             { "SPINE1", MatrixUtils::getTransform(5.75050f, -0.00290f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "SPINE2", MatrixUtils::getTransform(5.62550f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "Chest", MatrixUtils::getTransform(5.53660f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "LArm_Collarbone",
-              MatrixUtils::getTransform(22.192f, 0.34820f, 1.00420f, -0.34818f, -0.05435f, -0.93585f, -0.26919f, 0.96207f, 0.04428f, 0.89794f, 0.26734f, -0.34961f, 1.0f) },
+                MatrixUtils::getTransform(22.192f, 0.34820f, 1.00420f, -0.34818f, -0.05435f, -0.93585f, -0.26919f, 0.96207f, 0.04428f, 0.89794f, 0.26734f, -0.34961f, 1.0f) },
             { "LArm_UpperArm",
-              MatrixUtils::getTransform(14.59840f, 0.00010f, 0.00010f, 0.77214f, -0.19393f, -0.60514f, 0.08574f, 0.97538f, -0.20318f, 0.62964f, 0.10499f, 0.76976f, 1.0f) },
+                MatrixUtils::getTransform(14.59840f, 0.00010f, 0.00010f, 0.77214f, -0.19393f, -0.60514f, 0.08574f, 0.97538f, -0.20318f, 0.62964f, 0.10499f, 0.76976f, 1.0f) },
             { "LArm_ForeArm1",
-              MatrixUtils::getTransform(19.53690f, 0.41980f, 0.04580f, 0.92233f, -0.38166f, -0.06030f, 0.38176f, 0.92420f, -0.01042f, 0.05971f, -0.01341f, 0.99813f, 1.0f) },
+                MatrixUtils::getTransform(19.53690f, 0.41980f, 0.04580f, 0.92233f, -0.38166f, -0.06030f, 0.38176f, 0.92420f, -0.01042f, 0.05971f, -0.01341f, 0.99813f, 1.0f) },
             { "LArm_ForeArm2", MatrixUtils::getTransform(0.00020f, 0.00020f, 0.00020f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "LArm_ForeArm3", MatrixUtils::getTransform(10.000494f, 0.000162f, -0.000004f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "LArm_Hand",
-              MatrixUtils::getTransform(26.96440f, 0.00020f, 0.00040f, 0.98604f, 0.16503f, 0.02218f, 0.00691f, -0.17364f, 0.98479f, 0.16638f, -0.97088f, -0.17236f, 1.0f) },
+                MatrixUtils::getTransform(26.96440f, 0.00020f, 0.00040f, 0.98604f, 0.16503f, 0.02218f, 0.00691f, -0.17364f, 0.98479f, 0.16638f, -0.97088f, -0.17236f, 1.0f) },
             { "RArm_Collarbone",
-              MatrixUtils::getTransform(22.19190f, 0.34810f, -1.004f, -0.34818f, -0.06482f, 0.93518f, -0.26918f, 0.96251f, -0.03351f, -0.89795f, -0.26340f, -0.35257f, 1.0f) },
+                MatrixUtils::getTransform(22.19190f, 0.34810f, -1.004f, -0.34818f, -0.06482f, 0.93518f, -0.26918f, 0.96251f, -0.03351f, -0.89795f, -0.26340f, -0.35257f, 1.0f) },
             { "RArm_UpperArm",
-              MatrixUtils::getTransform(14.59880f, 0.0f, 0.0f, 0.77213f, -0.19339f, 0.60533f, 0.09277f, 0.97667f, 0.19369f, -0.62866f, -0.09340f, 0.77205f, 1.0f) },
+                MatrixUtils::getTransform(14.59880f, 0.0f, 0.0f, 0.77213f, -0.19339f, 0.60533f, 0.09277f, 0.97667f, 0.19369f, -0.62866f, -0.09340f, 0.77205f, 1.0f) },
             { "RArm_ForeArm1",
-              MatrixUtils::getTransform(19.53660f, 0.41990f, -0.04620f, 0.92233f, -0.38166f, 0.06029f, 0.38171f, 0.92422f, 0.01129f, -0.06003f, 0.01260f, 0.99812f, 1.0f) },
+                MatrixUtils::getTransform(19.53660f, 0.41990f, -0.04620f, 0.92233f, -0.38166f, 0.06029f, 0.38171f, 0.92422f, 0.01129f, -0.06003f, 0.01260f, 0.99812f, 1.0f) },
             { "RArm_ForeArm2", MatrixUtils::getTransform(-0.00010f, -0.00010f, -0.00010f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "RArm_ForeArm3", MatrixUtils::getTransform(10.00050f, -0.00010f, 0.00010f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f) },
             { "RArm_Hand",
-              MatrixUtils::getTransform(26.96460f, 0.00010f, 0.00120f, 0.98604f, 0.16503f, -0.02218f, 0.00691f, -0.17364f, -0.98479f, -0.16638f, 0.97088f, -0.17236f, 1.0f) },
+                MatrixUtils::getTransform(26.96460f, 0.00010f, 0.00120f, 0.98604f, 0.16503f, -0.02218f, 0.00691f, -0.17364f, -0.98479f, -0.16638f, 0.97088f, -0.17236f, 1.0f) },
             { "Neck", MatrixUtils::getTransform(24.29350f, -2.84160f, 0.0f, 0.92612f, -0.37723f, -0.00002f, 0.37723f, 0.92612f, 0.00001f, 0.00002f, -0.00002f, 1.0f, 1.0f) },
             { "Head", MatrixUtils::getTransform(8.22440f, 0.0f, 0.0f, 0.94891f, 0.31555f, 0.00002f, -0.31555f, 0.94891f, 0.0f, -0.00002f, -0.00001f, 1.0f, 1.0f) },
         };
@@ -1992,8 +2065,7 @@ namespace frik
     {
         std::map<std::string, std::pair<std::string, std::string>> map;
 
-        auto addFingerRelations = [&](const std::string& hand, const std::string& finger1, const std::string& finger2,
-            const std::string& finger3) {
+        auto addFingerRelations = [&](const std::string& hand, const std::string& finger1, const std::string& finger2, const std::string& finger3) {
             map.insert({ finger1, { hand, finger2 } });
             map.insert({ finger2, { finger1, finger3 } });
             map.insert({ finger3, { finger2, std::string() } });
@@ -2021,37 +2093,14 @@ namespace frik
      */
     std::unordered_map<std::string, VRButtonId> Skeleton::getHandBonesButtonMap()
     {
-        return std::unordered_map<std::string, VRButtonId>{
-            { "LArm_Finger11", k_EButton_SteamVR_Touchpad },
-            { "LArm_Finger12", k_EButton_SteamVR_Touchpad },
-            { "LArm_Finger13", k_EButton_SteamVR_Touchpad },
-            { "LArm_Finger21", k_EButton_SteamVR_Trigger },
-            { "LArm_Finger22", k_EButton_SteamVR_Trigger },
-            { "LArm_Finger23", k_EButton_SteamVR_Trigger },
-            { "LArm_Finger31", k_EButton_Grip },
-            { "LArm_Finger32", k_EButton_Grip },
-            { "LArm_Finger33", k_EButton_Grip },
-            { "LArm_Finger41", k_EButton_Grip },
-            { "LArm_Finger42", k_EButton_Grip },
-            { "LArm_Finger43", k_EButton_Grip },
-            { "LArm_Finger51", k_EButton_Grip },
-            { "LArm_Finger52", k_EButton_Grip },
-            { "LArm_Finger53", k_EButton_Grip },
-            { "RArm_Finger11", k_EButton_SteamVR_Touchpad },
-            { "RArm_Finger12", k_EButton_SteamVR_Touchpad },
-            { "RArm_Finger13", k_EButton_SteamVR_Touchpad },
-            { "RArm_Finger21", k_EButton_SteamVR_Trigger },
-            { "RArm_Finger22", k_EButton_SteamVR_Trigger },
-            { "RArm_Finger23", k_EButton_SteamVR_Trigger },
-            { "RArm_Finger31", k_EButton_Grip },
-            { "RArm_Finger32", k_EButton_Grip },
-            { "RArm_Finger33", k_EButton_Grip },
-            { "RArm_Finger41", k_EButton_Grip },
-            { "RArm_Finger42", k_EButton_Grip },
-            { "RArm_Finger43", k_EButton_Grip },
-            { "RArm_Finger51", k_EButton_Grip },
-            { "RArm_Finger52", k_EButton_Grip },
-            { "RArm_Finger53", k_EButton_Grip }
-        };
+        return std::unordered_map<std::string, VRButtonId>{ { "LArm_Finger11", k_EButton_SteamVR_Touchpad }, { "LArm_Finger12", k_EButton_SteamVR_Touchpad },
+            { "LArm_Finger13", k_EButton_SteamVR_Touchpad }, { "LArm_Finger21", k_EButton_SteamVR_Trigger }, { "LArm_Finger22", k_EButton_SteamVR_Trigger },
+            { "LArm_Finger23", k_EButton_SteamVR_Trigger }, { "LArm_Finger31", k_EButton_Grip }, { "LArm_Finger32", k_EButton_Grip }, { "LArm_Finger33", k_EButton_Grip },
+            { "LArm_Finger41", k_EButton_Grip }, { "LArm_Finger42", k_EButton_Grip }, { "LArm_Finger43", k_EButton_Grip }, { "LArm_Finger51", k_EButton_Grip },
+            { "LArm_Finger52", k_EButton_Grip }, { "LArm_Finger53", k_EButton_Grip }, { "RArm_Finger11", k_EButton_SteamVR_Touchpad },
+            { "RArm_Finger12", k_EButton_SteamVR_Touchpad }, { "RArm_Finger13", k_EButton_SteamVR_Touchpad }, { "RArm_Finger21", k_EButton_SteamVR_Trigger },
+            { "RArm_Finger22", k_EButton_SteamVR_Trigger }, { "RArm_Finger23", k_EButton_SteamVR_Trigger }, { "RArm_Finger31", k_EButton_Grip },
+            { "RArm_Finger32", k_EButton_Grip }, { "RArm_Finger33", k_EButton_Grip }, { "RArm_Finger41", k_EButton_Grip }, { "RArm_Finger42", k_EButton_Grip },
+            { "RArm_Finger43", k_EButton_Grip }, { "RArm_Finger51", k_EButton_Grip }, { "RArm_Finger52", k_EButton_Grip }, { "RArm_Finger53", k_EButton_Grip } };
     }
 }

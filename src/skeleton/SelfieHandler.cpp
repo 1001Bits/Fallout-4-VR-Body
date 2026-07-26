@@ -1,20 +1,20 @@
 #include "SelfieHandler.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "FRIK.h"
 
 using namespace common;
 
 namespace frik
 {
-    void SelfieHandler::onFrameUpdate(const RE::NiPoint3& hmdPivot) const
-    {
-        basicSelfie(hmdPivot);
-    }
+    void SelfieHandler::onFrameUpdate(const RE::NiPoint3& hmdPivot, const RE::NiPoint3& bodyForward) const { basicSelfie(hmdPivot, bodyForward); }
 
     /**
      * Projects the 3rd person body out in front of the player by offset amount
      */
-    void SelfieHandler::basicSelfie(const RE::NiPoint3& hmdPivot) const
+    void SelfieHandler::basicSelfie(const RE::NiPoint3& hmdPivot, const RE::NiPoint3& bodyForward) const
     {
         if (!g_frik.isSelfieModeOn()) {
             return;
@@ -28,10 +28,25 @@ namespace frik
         const float z = root->local.translate.z;
         const auto body = root->parent;
 
-        const auto back = MatrixUtils::vec3Norm(RE::NiPoint3(-_forwardDir.x, -_forwardDir.y, 0));
+        RE::NiPoint3 back(-bodyForward.x, -bodyForward.y, 0.0f);
+        const float backLength = MatrixUtils::vec3Len(back);
+        if (!std::isfinite(backLength) || backLength <= 0.0001f) {
+            return;
+        }
+        back /= backLength;
         const auto bodyDir = RE::NiPoint3(0, 1, 0);
 
-        root->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(back, bodyDir) * body->world.rotate.Transpose();
+        RE::NiMatrix3 facing;
+        const float facingDot = std::clamp(MatrixUtils::vec3Dot(back, bodyDir), -1.0f, 1.0f);
+        if (facingDot <= -0.99999f) {
+            // The shared from-to helper collapses when vectors are exactly
+            // antiparallel; a deterministic 180-degree Z rotation is valid
+            // for these already-planar directions.
+            facing = MatrixUtils::getMatrix(-1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+        } else {
+            facing = MatrixUtils::getMatrixFromRotateVectorVec(back, bodyDir);
+        }
+        root->local.rotate = facing * body->world.rotate.Transpose();
         root->local.translate = body->world.translate - hmdPivot;
         root->local.translate.y += g_config.selfieOutFrontDistance;
         root->local.translate.z = z;

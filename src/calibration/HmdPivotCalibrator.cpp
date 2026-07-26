@@ -22,20 +22,11 @@ namespace frik::calibration
             double rmse = std::numeric_limits<double>::infinity();
         };
 
-        Vec3 operator+(const Vec3& lhs, const Vec3& rhs)
-        {
-            return { lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z };
-        }
+        Vec3 operator+(const Vec3& lhs, const Vec3& rhs) { return { lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z }; }
 
-        Vec3 operator-(const Vec3& lhs, const Vec3& rhs)
-        {
-            return { lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z };
-        }
+        Vec3 operator-(const Vec3& lhs, const Vec3& rhs) { return { lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z }; }
 
-        Vec3 operator*(const Vec3& value, const double scale)
-        {
-            return { value.x * scale, value.y * scale, value.z * scale };
-        }
+        Vec3 operator*(const Vec3& value, const double scale) { return { value.x * scale, value.y * scale, value.z * scale }; }
 
         Vec3& operator+=(Vec3& lhs, const Vec3& rhs)
         {
@@ -43,35 +34,22 @@ namespace frik::calibration
             return lhs;
         }
 
-        double squaredLength(const Vec3& value)
-        {
-            return value.x * value.x + value.y * value.y + value.z * value.z;
-        }
+        double squaredLength(const Vec3& value) { return value.x * value.x + value.y * value.y + value.z * value.z; }
 
-        double length(const Vec3& value)
-        {
-            return std::sqrt(squaredLength(value));
-        }
+        double length(const Vec3& value) { return std::sqrt(squaredLength(value)); }
 
         Vec3 multiply(const Mat3& matrix, const Vec3& vector)
         {
-            return {
-                matrix(0, 0) * vector.x + matrix(0, 1) * vector.y + matrix(0, 2) * vector.z,
-                matrix(1, 0) * vector.x + matrix(1, 1) * vector.y + matrix(1, 2) * vector.z,
-                matrix(2, 0) * vector.x + matrix(2, 1) * vector.y + matrix(2, 2) * vector.z
-            };
+            return { matrix(0, 0) * vector.x + matrix(0, 1) * vector.y + matrix(0, 2) * vector.z, matrix(1, 0) * vector.x + matrix(1, 1) * vector.y + matrix(1, 2) * vector.z,
+                matrix(2, 0) * vector.x + matrix(2, 1) * vector.y + matrix(2, 2) * vector.z };
         }
 
-        bool isFinite(const Vec3& value)
-        {
-            return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
-        }
+        bool isFinite(const Vec3& value) { return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z); }
 
         double determinant(const Mat3& matrix)
         {
-            return matrix(0, 0) * (matrix(1, 1) * matrix(2, 2) - matrix(1, 2) * matrix(2, 1))
-                - matrix(0, 1) * (matrix(1, 0) * matrix(2, 2) - matrix(1, 2) * matrix(2, 0))
-                + matrix(0, 2) * (matrix(1, 0) * matrix(2, 1) - matrix(1, 1) * matrix(2, 0));
+            return matrix(0, 0) * (matrix(1, 1) * matrix(2, 2) - matrix(1, 2) * matrix(2, 1)) - matrix(0, 1) * (matrix(1, 0) * matrix(2, 2) - matrix(1, 2) * matrix(2, 0)) +
+                matrix(0, 2) * (matrix(1, 0) * matrix(2, 1) - matrix(1, 1) * matrix(2, 0));
         }
 
         bool isRotationMatrix(const Mat3& matrix)
@@ -154,8 +132,7 @@ namespace frik::calibration
             return result;
         }
 
-        bool solve3x3(
-            std::array<std::array<double, 3>, 3> matrix, const std::array<double, 3>& rightHandSide, Vec3& solution)
+        bool solve3x3(std::array<std::array<double, 3>, 3> matrix, const std::array<double, 3>& rightHandSide, Vec3& solution)
         {
             std::array<std::array<double, 4>, 3> augmented{};
             for (std::size_t row = 0; row < 3; ++row) {
@@ -225,8 +202,7 @@ namespace frik::calibration
                 double deltaRotation[3][3]{};
                 for (std::size_t row = 0; row < 3; ++row) {
                     for (std::size_t column = 0; column < 3; ++column) {
-                        deltaRotation[row][column] =
-                            samples[index].rotation(row, column) * samples[index].worldScale - meanRotation(row, column);
+                        deltaRotation[row][column] = samples[index].rotation(row, column) * samples[index].worldScale - meanRotation(row, column);
                     }
                 }
 
@@ -253,16 +229,14 @@ namespace frik::calibration
             }
 
             for (const auto index : indices) {
-                fit.pivot += computeWorldPivot(
-                    samples[index].position, samples[index].rotation, samples[index].worldScale, fit.offset);
+                fit.pivot += computeWorldPivot(samples[index].position, samples[index].rotation, samples[index].worldScale, fit.offset);
             }
             fit.pivot = fit.pivot * inverseCount;
 
             double residualSquaredSum = 0.0;
             fit.residuals.reserve(indices.size());
             for (const auto index : indices) {
-                const auto predictedPosition =
-                    fit.pivot + multiply(samples[index].rotation, fit.offset) * samples[index].worldScale;
+                const auto predictedPosition = fit.pivot + multiply(samples[index].rotation, fit.offset) * samples[index].worldScale;
                 const auto residual = length(samples[index].position - predictedPosition);
                 fit.residuals.push_back(residual);
                 residualSquaredSum += residual * residual;
@@ -286,12 +260,7 @@ namespace frik::calibration
             return result;
         }
 
-        bool plausibleOffset(const Vec3& offset)
-        {
-            return offset.x >= -8.0 && offset.x <= 8.0
-                && offset.y >= 1.0 && offset.y <= 16.0
-                && offset.z >= 2.0 && offset.z <= 20.0;
-        }
+        bool plausibleOffset(const Vec3& offset) { return offset.x >= -8.0 && offset.x <= 8.0 && offset.y >= 1.0 && offset.y <= 16.0 && offset.z >= 2.0 && offset.z <= 20.0; }
     }
 
     Mat3 Mat3::identity()
@@ -303,16 +272,12 @@ namespace frik::calibration
         return result;
     }
 
-    HmdPivotCalibrator::HmdPivotCalibrator(HmdPivotCalibratorSettings settings) :
-        _settings(settings)
-    {
-    }
+    HmdPivotCalibrator::HmdPivotCalibrator(HmdPivotCalibratorSettings settings) : _settings(settings) {}
 
     SampleStatus HmdPivotCalibrator::addSample(const HmdPoseSample& sample)
     {
-        if (!std::isfinite(sample.timestampSeconds) || !std::isfinite(sample.worldScale)
-            || sample.worldScale < 0.5 || sample.worldScale > 2.0
-            || !isFinite(sample.position) || !isRotationMatrix(sample.rotation)) {
+        if (!std::isfinite(sample.timestampSeconds) || !std::isfinite(sample.worldScale) || sample.worldScale < 0.5 || sample.worldScale > 2.0 || !isFinite(sample.position) ||
+            !isRotationMatrix(sample.rotation)) {
             return SampleStatus::Invalid;
         }
 
@@ -325,8 +290,7 @@ namespace frik::calibration
             if (elapsed < _settings.minimumSampleIntervalSeconds) {
                 return SampleStatus::IgnoredTooSoon;
             }
-            if (elapsed > _settings.trackingGapResetSeconds
-                || length(sample.position - _samples.back().position) > _settings.recenterJumpDistance) {
+            if (elapsed > _settings.trackingGapResetSeconds || length(sample.position - _samples.back().position) > _settings.recenterJumpDistance) {
                 reset();
                 status = SampleStatus::ResetAfterTrackingDiscontinuity;
             }
@@ -336,8 +300,7 @@ namespace frik::calibration
         while (_samples.size() > _settings.maximumSamples) {
             _samples.pop_front();
         }
-        while (_samples.size() > 1
-               && _samples.back().timestampSeconds - _samples.front().timestampSeconds > _settings.retainedDurationSeconds) {
+        while (_samples.size() > 1 && _samples.back().timestampSeconds - _samples.front().timestampSeconds > _settings.retainedDurationSeconds) {
             _samples.pop_front();
         }
         return status;
@@ -361,8 +324,7 @@ namespace frik::calibration
         // Farthest pair is a simple, interpretable overall coverage metric.
         for (std::size_t first = 0; first < _samples.size(); ++first) {
             for (std::size_t second = first + 1; second < _samples.size(); ++second) {
-                result.orientationSpanRadians = std::max(
-                    result.orientationSpanRadians, rotationDistance(_samples[first].rotation, _samples[second].rotation));
+                result.orientationSpanRadians = (std::max)(result.orientationSpanRadians, rotationDistance(_samples[first].rotation, _samples[second].rotation));
             }
         }
         if (result.orientationSpanRadians < _settings.minimumOrientationSpanRadians) {
@@ -374,8 +336,7 @@ namespace frik::calibration
         std::iota(allIndices.begin(), allIndices.end(), std::size_t{ 0 });
         const auto initialFit = fitSamples(_samples, allIndices);
         result.conditionNumber = initialFit.conditionNumber;
-        if (!initialFit.solved || initialFit.minimumEigenvalue < _settings.minimumNormalEigenvalue
-            || initialFit.conditionNumber > _settings.maximumConditionNumber) {
+        if (!initialFit.solved || initialFit.minimumEigenvalue < _settings.minimumNormalEigenvalue || initialFit.conditionNumber > _settings.maximumConditionNumber) {
             result.failure = CalibrationFailure::PoorConditioning;
             return result;
         }
@@ -387,7 +348,7 @@ namespace frik::calibration
             absoluteDeviations.push_back(std::abs(residual - residualMedian));
         }
         const auto robustSigma = 1.4826 * median(std::move(absoluteDeviations));
-        const auto inlierThreshold = std::max(0.35, residualMedian + _settings.outlierSigma * std::max(robustSigma, 0.1));
+        const auto inlierThreshold = (std::max)(0.35, residualMedian + _settings.outlierSigma * (std::max)(robustSigma, 0.1));
 
         std::vector<std::size_t> inlierIndices;
         inlierIndices.reserve(allIndices.size());
@@ -397,8 +358,7 @@ namespace frik::calibration
             }
         }
         result.inlierCount = inlierIndices.size();
-        if (inlierIndices.size() < _settings.minimumSamples
-            || static_cast<double>(inlierIndices.size()) / static_cast<double>(_samples.size()) < _settings.minimumInlierRatio) {
+        if (inlierIndices.size() < _settings.minimumSamples || static_cast<double>(inlierIndices.size()) / static_cast<double>(_samples.size()) < _settings.minimumInlierRatio) {
             result.failure = CalibrationFailure::TooManyOutliers;
             return result;
         }
@@ -406,8 +366,7 @@ namespace frik::calibration
         const auto finalFit = fitSamples(_samples, inlierIndices);
         result.conditionNumber = finalFit.conditionNumber;
         result.residualRmse = finalFit.rmse;
-        if (!finalFit.solved || finalFit.minimumEigenvalue < _settings.minimumNormalEigenvalue
-            || finalFit.conditionNumber > _settings.maximumConditionNumber) {
+        if (!finalFit.solved || finalFit.minimumEigenvalue < _settings.minimumNormalEigenvalue || finalFit.conditionNumber > _settings.maximumConditionNumber) {
             result.failure = CalibrationFailure::PoorConditioning;
             return result;
         }
@@ -426,15 +385,9 @@ namespace frik::calibration
         return result;
     }
 
-    void HmdPivotCalibrator::reset()
-    {
-        _samples.clear();
-    }
+    void HmdPivotCalibrator::reset() { _samples.clear(); }
 
-    double HmdPivotCalibrator::durationSeconds() const
-    {
-        return _samples.size() > 1 ? _samples.back().timestampSeconds - _samples.front().timestampSeconds : 0.0;
-    }
+    double HmdPivotCalibrator::durationSeconds() const { return _samples.size() > 1 ? _samples.back().timestampSeconds - _samples.front().timestampSeconds : 0.0; }
 
     const char* describeCalibrationFailure(const CalibrationFailure failure)
     {
@@ -459,8 +412,7 @@ namespace frik::calibration
         return "unknown calibration error";
     }
 
-    Vec3 computeWorldPivot(
-        const Vec3& trackedHmdPosition, const Mat3& localToWorldRotation, const double worldScale, const Vec3& pivotToHmdOffset)
+    Vec3 computeWorldPivot(const Vec3& trackedHmdPosition, const Mat3& localToWorldRotation, const double worldScale, const Vec3& pivotToHmdOffset)
     {
         return trackedHmdPosition - multiply(localToWorldRotation, pivotToHmdOffset) * worldScale;
     }

@@ -23,13 +23,22 @@ namespace frik
 
     class BodyAdjustmentSubConfigMode
     {
-    public :
+    public:
         explicit BodyAdjustmentSubConfigMode(const std::function<void()>& onClose);
 
         void onFrameUpdate();
-        static void updateLegSlack(float skeletonLegSlack);
+        static void updateLegSlack(float rightLegSlack, float leftLegSlack);
 
     private:
+        struct HeightCalibrationSample
+        {
+            float rawUprightHeight = 0.0f;
+            float pivotCoefficientX = 0.0f;
+            float pivotCoefficientY = 0.0f;
+            float pivotCoefficientZ = 0.0f;
+            float hmdToPlayerScale = 1.0f;
+        };
+
         void createConfigUI();
         void clearConfigTarget();
         void beginHmdPivotCalibration();
@@ -51,20 +60,23 @@ namespace frik
         void saveConfig();
         void resetConfig();
 
-        // The leg solver reports right then left. Pairing both values prevents
-        // one planted/bent leg from driving an unsafe whole-body correction.
-        inline static float _pendingLegSlack = 0.0f;
+        // A complete same-frame pair prevents one planted/bent leg from
+        // driving an unsafe whole-body correction.
         inline static float _bilateralLegSlackLow = 0.0f;
         inline static float _bilateralLegSlackHigh = 0.0f;
-        inline static bool _hasPendingLegSlack = false;
         inline static bool _hasBilateralLegSlack = false;
 
         std::function<void()> _onClose;
 
         BodyAdjustmentConfigTarget _configTarget = BodyAdjustmentConfigTarget::None;
         calibration::HmdPivotCalibrator _hmdPivotCalibrator;
-        std::vector<float> _heightSamples;
+        std::vector<HeightCalibrationSample> _heightSamples;
         std::vector<float> _wristSpanSamples;
+        std::vector<std::chrono::steady_clock::time_point> _wristSpanSampleTimes;
+        std::chrono::steady_clock::time_point _heightCaptureStartedAt;
+        std::chrono::steady_clock::time_point _armSpanCaptureStartedAt;
+        std::chrono::steady_clock::time_point _lastHeightSampleAt;
+        std::chrono::steady_clock::time_point _lastArmSpanSampleAt;
         std::chrono::steady_clock::time_point _lastLegSlackUpdate = std::chrono::steady_clock::now();
 
         // configuration UI

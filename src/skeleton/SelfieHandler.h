@@ -5,10 +5,10 @@ namespace frik
     class SelfieHandler
     {
     public:
-        void onFrameUpdate(const RE::NiPoint3& hmdPivot) const;
+        void onFrameUpdate(const RE::NiPoint3& hmdPivot, const RE::NiPoint3& bodyForward) const;
 
     private:
-        void basicSelfie(const RE::NiPoint3& hmdPivot) const;
+        void basicSelfie(const RE::NiPoint3& hmdPivot, const RE::NiPoint3& bodyForward) const;
         void testSelfie();
         void enterSelfieMode();
         void exitSelfieMode() const;
