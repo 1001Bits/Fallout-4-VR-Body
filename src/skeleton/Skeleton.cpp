@@ -1945,7 +1945,9 @@ namespace frik
             .handSide = toIKVector(safeNormalize(handInSide, sidewaysDir)),
             .upperLength = originalUpperLen * adjustedArmLength,
             .lowerLength = originalForearmLen * adjustedArmLength,
-            .deltaTime = _frameTime };
+            .deltaTime = _frameTime,
+            .elbowAngleOffset = g_config.elbowAngleOffset,
+            .elbowUpWeight = g_config.elbowUpWeight };
         auto candidateContinuity = continuity;
         const auto solve = ik::solveArm(solveInput, candidateContinuity);
         if (!solve.valid) {

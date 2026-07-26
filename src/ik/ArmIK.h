@@ -32,6 +32,12 @@ namespace frik::ik
         float upperLength = 0.0f;
         float lowerLength = 0.0f;
         float deltaTime = 0.0f;
+
+        // Parger's empirical elbow-placement parameters, exposed so the resting
+        // elbow can be tuned against a real body instead of trusting the published
+        // constants. Defaults are the published values.
+        float elbowAngleOffset = 135.0f; // neutral swivel angle about the reach axis, degrees
+        float elbowUpWeight = 60.0f; // how strongly hand height swings the elbow
     };
 
     struct ArmSolveResult

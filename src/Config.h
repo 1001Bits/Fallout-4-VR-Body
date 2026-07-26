@@ -136,6 +136,8 @@ namespace frik
         bool groundAwareFeet = false;
         float turnInPlaceStepDegrees = 0.0f;
         bool gateLegsOnActorState = false;
+        float elbowAngleOffset = 135.0f;
+        float elbowUpWeight = 60.0f;
 
         // Head Geometry Hide
         bool hideHead = false;

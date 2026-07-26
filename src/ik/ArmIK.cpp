@@ -72,11 +72,12 @@ namespace
         return std::atan2(frik::ik::dot(axis, frik::ik::cross(safeFrom, safeTo)), frik::ik::dot(safeFrom, safeTo));
     }
 
-    float getPositionElbowAngle(const frik::ik::Vec3& localHand)
+    float getPositionElbowAngle(const frik::ik::Vec3& localHand, const float angleOffset, const float upWeight)
     {
         // Parameters from Parger's published VRArmIK implementation. The input
         // is dimensionless: shoulder-to-hand position divided by arm length.
-        float angle = kElbowAngleOffset - 60.0f * localHand.z;
+        // The offset and up-weight are tunable; the rest are the published values.
+        float angle = angleOffset - upWeight * localHand.z;
 
         const float forwardDistance = (std::max)(0.6f - localHand.y, 0.0f);
         if (localHand.z > 0.0f) {
@@ -292,7 +293,9 @@ namespace frik::ik
             swivelTangent = swivelTangent * -1.0f;
         }
 
-        const float elbowAngle = degreesToRadians(getPositionElbowAngle(localHand));
+        const float offset = isFinite(input.elbowAngleOffset) ? std::clamp(input.elbowAngleOffset, 60.0f, 175.0f) : kElbowAngleOffset;
+        const float upWeight = isFinite(input.elbowUpWeight) ? std::clamp(input.elbowUpWeight, 0.0f, 150.0f) : 60.0f;
+        const float elbowAngle = degreesToRadians(getPositionElbowAngle(localHand, offset, upWeight));
         Vec3 desiredPole = safeNormalize(baseUp * std::cos(elbowAngle) + swivelTangent * std::sin(elbowAngle), fixedPole);
 
         // The swivel model is singular near the shoulder's vertical axis.
