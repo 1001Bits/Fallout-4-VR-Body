@@ -126,6 +126,7 @@ namespace frik
         configureGameVars();
 
         _playerControlsHandler.reset();
+        _smoothMovement.reset();
     }
 
     /**
@@ -290,6 +291,8 @@ namespace frik
      */
     void FRIK::releaseSkeleton()
     {
+        _smoothMovement.reset();
+
         _workingRootNode = nullptr;
 
         delete _skelly;
