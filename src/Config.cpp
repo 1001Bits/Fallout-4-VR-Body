@@ -306,6 +306,7 @@ namespace frik
         torsoTwistShare = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fTorsoTwistShare", 0.0f));
         groundAwareFeet = ini.GetBoolValue(INI_SECTION_MAIN, "bGroundAwareFeet", false);
         turnInPlaceStepDegrees = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fTurnInPlaceStepDegrees", 0.0f));
+        gateLegsOnActorState = ini.GetBoolValue(INI_SECTION_MAIN, "bGateLegsOnActorState", false);
         validateSolverCalibrationConfig();
 
         // armLength remains the authoritative compatibility alias while both
@@ -472,6 +473,7 @@ namespace frik
         ini.SetDoubleValue(INI_SECTION_MAIN, "fTorsoTwistShare", torsoTwistShare);
         ini.SetBoolValue(INI_SECTION_MAIN, "bGroundAwareFeet", groundAwareFeet);
         ini.SetDoubleValue(INI_SECTION_MAIN, "fTurnInPlaceStepDegrees", turnInPlaceStepDegrees);
+        ini.SetBoolValue(INI_SECTION_MAIN, "bGateLegsOnActorState", gateLegsOnActorState);
         ini.SetBoolValue(INI_SECTION_MAIN, "hidePipboy", hidePipboy);
         ini.SetDoubleValue(INI_SECTION_MAIN, "PipboyScale", pipBoyScale);
         ini.SetBoolValue(INI_SECTION_MAIN, "HoloPipBoyEnabled", isHoloPipboy);

@@ -135,6 +135,7 @@ namespace frik
         float torsoTwistShare = 0.0f;
         bool groundAwareFeet = false;
         float turnInPlaceStepDegrees = 0.0f;
+        bool gateLegsOnActorState = false;
 
         // Head Geometry Hide
         bool hideHead = false;

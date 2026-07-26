@@ -832,37 +832,44 @@ namespace frik
         } else if (g_frik.isPauseMenuOpen()) {
             reason = "pause menu";
         } else if (isJumpingOrInAir()) {
+            // Pre-existing framework helper; 0.77.12's smooth movement already relied
+            // on it, so it is known to behave correctly on this runtime.
             reason = "jumping or in air";
-        } else if (isSwimming(player)) {
-            reason = "swimming";
-        } else if (isUnderwater(player)) {
-            reason = "underwater";
-        } else if (player->IsDead(false)) {
-            reason = "dead";
-        } else if (player->DoGetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal) {
-            reason = "sitting or sleeping";
-        } else {
-            // Only veto camera states where a procedural gait is clearly wrong. The
-            // previous code allowlisted FirstPerson/IronSights and failed closed on
-            // everything else, so any state Fallout 4 VR reports outside that pair
-            // killed the legs permanently. Unknown states are now allowed through.
-            const auto playerCamera = getPlayerCamera();
-            if (playerCamera && playerCamera->cameraState) {
-                switch (playerCamera->cameraState->stateID) {
-                case F4SEVR::PlayerCamera::kCameraState_ThirdPerson1:
-                case F4SEVR::PlayerCamera::kCameraState_ThirdPerson2:
-                case F4SEVR::PlayerCamera::kCameraState_AutoVanity:
-                case F4SEVR::PlayerCamera::kCameraState_Free:
-                case F4SEVR::PlayerCamera::kCameraState_TweenMenu:
-                case F4SEVR::PlayerCamera::kCameraState_Furniture:
-                case F4SEVR::PlayerCamera::kCameraState_Horse:
-                case F4SEVR::PlayerCamera::kCameraState_Bleedout:
-                case F4SEVR::PlayerCamera::kCameraState_Dialogue:
-                case F4SEVR::PlayerCamera::kCameraState_VATS:
-                    reason = "camera state";
-                    break;
-                default:
-                    break;
+        } else if (g_config.gateLegsOnActorState) {
+            // Everything below reads CommonLibF4 layouts and virtual slots that were
+            // authored for flat Fallout 4 and are unverified against the VR binary.
+            // Three of them have already been observed disabling the legs outright on
+            // a normal standing player: the camera-state allowlist, isPlayingSeated,
+            // and DoGetSitSleepState. 0.77.12 shipped with no locomotion gating at
+            // all, so this whole group is opt-in - a nicety must not be able to cost
+            // you your legs.
+            if (isSwimming(player)) {
+                reason = "swimming";
+            } else if (isUnderwater(player)) {
+                reason = "underwater";
+            } else if (player->IsDead(false)) {
+                reason = "dead";
+            } else if (player->DoGetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal) {
+                reason = "sitting or sleeping";
+            } else {
+                const auto playerCamera = getPlayerCamera();
+                if (playerCamera && playerCamera->cameraState) {
+                    switch (playerCamera->cameraState->stateID) {
+                    case F4SEVR::PlayerCamera::kCameraState_ThirdPerson1:
+                    case F4SEVR::PlayerCamera::kCameraState_ThirdPerson2:
+                    case F4SEVR::PlayerCamera::kCameraState_AutoVanity:
+                    case F4SEVR::PlayerCamera::kCameraState_Free:
+                    case F4SEVR::PlayerCamera::kCameraState_TweenMenu:
+                    case F4SEVR::PlayerCamera::kCameraState_Furniture:
+                    case F4SEVR::PlayerCamera::kCameraState_Horse:
+                    case F4SEVR::PlayerCamera::kCameraState_Bleedout:
+                    case F4SEVR::PlayerCamera::kCameraState_Dialogue:
+                    case F4SEVR::PlayerCamera::kCameraState_VATS:
+                        reason = "camera state";
+                        break;
+                    default:
+                        break;
+                    }
                 }
             }
         }

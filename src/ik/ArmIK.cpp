@@ -11,6 +11,10 @@ namespace
     constexpr float kMaximumElbowAngle = 175.0f;
     constexpr float kElbowAngleOffset = 135.0f;
     constexpr float kVerticalAxisCorrectionStart = 0.5f;
+    // Reach ratios over which the elbow swivel stops being meaningfully constrained;
+    // below the start the previous pole dominates entirely.
+    constexpr float kCloseReachCorrectionStart = 0.30f;
+    constexpr float kCloseReachCorrectionEnd = 0.55f;
     constexpr float kBehindShoulderCorrectionRange = 0.1f;
     constexpr float kWristDeadZone = 54.0f;
     constexpr float kMaximumWristCorrection = 35.0f;
@@ -297,7 +301,14 @@ namespace frik::ik
         const float verticalDistance = std::sqrt(localHand.x * localHand.x + localHand.y * localHand.y);
         const float verticalWeight = 1.0f - smoothStep(0.0f, kVerticalAxisCorrectionStart, verticalDistance);
         const float behindWeight = smoothStep(0.0f, kBehindShoulderCorrectionRange, -localHand.y);
-        const float singularWeight = (std::max)(verticalWeight, behindWeight);
+
+        // With the hand close to the shoulder the triangle is nearly degenerate: the
+        // swivel is barely constrained, so a small hand movement swings the elbow a
+        // long way. Observed in VR as an 81 degree single-frame swing at reach 0.27.
+        // Treat low reach as another singular region and lean on continuity there,
+        // exactly as the vertical-axis and behind-shoulder cases already do.
+        const float closeReachWeight = 1.0f - smoothStep(kCloseReachCorrectionStart, kCloseReachCorrectionEnd, result.reachRatio);
+        const float singularWeight = (std::max)((std::max)(verticalWeight, behindWeight), closeReachWeight);
 
         Vec3 stableReference = fixedPole;
         if (continuity.hasPole && length(previousPole) > kEpsilon) {
