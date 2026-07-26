@@ -416,6 +416,10 @@ namespace frik
         setWandsVisibility(false, true);
         setWandsVisibility(false, false);
 
+        if (g_config.checkDebugDumpDataOnceFor("bonemap")) {
+            dumpAnimationBoneMap();
+        }
+
         _solveLegsThisFrame = canUseProceduralLegs();
 
         logger::trace("Restore locals of skeleton");
@@ -618,6 +622,86 @@ namespace frik
         }
 
         return true;
+    }
+
+    /**
+     * One-shot dump answering whether Fallout 4 VR can supply animated legs.
+     *
+     * PlayerCharacter::PostUpdateAnimationGraphManager copies an animated pose from
+     * the first-person bone tree onto the third-person body through
+     * PlayerCharacter::boneMapping1stTo3rd, a BSTArray<BSTTuple<int,int>> of
+     * {firstPersonIndex, thirdPersonIndex}. Reverse engineered from
+     * Fallout4VR.exe 1.2.72: the array data sits at player+0x1238 and its size at
+     * player+0x1248 (see docs/ANIMATION_DRIVEN_LEGS.md).
+     *
+     * Whether the legs are in that map decides whether an animation-driven gait is
+     * possible at all, and the map is runtime data, so it cannot be read statically.
+     * Enable by adding "bonemap" to sDebugDumpDataOnceNames in FRIK.ini.
+     */
+    void Skeleton::dumpAnimationBoneMap() const
+    {
+        const auto player = RE::PlayerCharacter::GetSingleton();
+        if (!player || !_root) {
+            logger::info("[BONEMAP] no player or root node");
+            return;
+        }
+
+        const auto playerBase = reinterpret_cast<const std::byte*>(player);
+        const auto mapEntries = *reinterpret_cast<const std::int32_t* const*>(playerBase + 0x1238);
+        const auto mapCount = *reinterpret_cast<const std::uint32_t*>(playerBase + 0x1248);
+
+        const auto thirdPerson = reinterpret_cast<BSFlattenedBoneTree*>(_root);
+        const auto firstPerson = reinterpret_cast<BSFlattenedBoneTree*>(getFirstPersonSkeleton());
+
+        logger::info("[BONEMAP] entries={} first-person tree={} bones={} third-person tree={} bones={}", mapCount, firstPerson ? "yes" : "no",
+            firstPerson ? firstPerson->numTransforms : -1, thirdPerson ? "yes" : "no", thirdPerson ? thirdPerson->numTransforms : -1);
+
+        // A malformed count would walk off the heap; 4096 is far above any skeleton.
+        if (!mapEntries || mapCount == 0 || mapCount > 4096) {
+            logger::info("[BONEMAP] map is empty or implausible - the sync is not populated");
+            return;
+        }
+
+        const auto nameAt = [](const BSFlattenedBoneTree* tree, const std::int32_t index) -> const char* {
+            if (!tree || !tree->transforms || index < 0 || index >= tree->numTransforms) {
+                return "<out of range>";
+            }
+            const auto name = tree->transforms[index].name.c_str();
+            return name ? name : "<null>";
+        };
+
+        int legEntries = 0;
+        for (std::uint32_t entry = 0; entry < mapCount; ++entry) {
+            const auto firstIndex = mapEntries[entry * 2];
+            const auto thirdIndex = mapEntries[entry * 2 + 1];
+            const auto thirdName = nameAt(thirdPerson, thirdIndex);
+            logger::info("[BONEMAP] {:3}: 1st[{:3}]={} -> 3rd[{:3}]={}", entry, firstIndex, nameAt(firstPerson, firstIndex), thirdIndex, thirdName);
+            const std::string_view name(thirdName);
+            if (name.find("Leg") != std::string_view::npos || name.find("Thigh") != std::string_view::npos || name.find("Calf") != std::string_view::npos ||
+                name.find("Foot") != std::string_view::npos) {
+                ++legEntries;
+            }
+        }
+        logger::info("[BONEMAP] leg-related entries: {} -> animation-driven legs are {}", legEntries, legEntries > 0 ? "POSSIBLE" : "not available via this sync");
+
+        // Independently: does the first-person skeleton contain legs at all? This is
+        // the ceiling on what the sync can ever carry.
+        if (firstPerson && firstPerson->transforms && firstPerson->numTransforms > 0 && firstPerson->numTransforms < 4096) {
+            int firstPersonLegBones = 0;
+            for (int bone = 0; bone < firstPerson->numTransforms; ++bone) {
+                const auto boneName = firstPerson->transforms[bone].name.c_str();
+                if (!boneName) {
+                    continue;
+                }
+                const std::string_view name(boneName);
+                if (name.find("Leg") != std::string_view::npos || name.find("Thigh") != std::string_view::npos || name.find("Calf") != std::string_view::npos ||
+                    name.find("Foot") != std::string_view::npos) {
+                    ++firstPersonLegBones;
+                    logger::info("[BONEMAP] first-person leg bone: {}", boneName);
+                }
+            }
+            logger::info("[BONEMAP] first-person skeleton leg bones: {}", firstPersonLegBones);
+        }
     }
 
     void Skeleton::resetMotionState()

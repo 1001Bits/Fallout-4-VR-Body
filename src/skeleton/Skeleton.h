@@ -81,6 +81,7 @@ namespace frik
         void resetWalkingState();
         bool hasRequiredNodes() const;
         bool canUseProceduralLegs();
+        void dumpAnimationBoneMap() const;
         // Last reported gating reason, so the log fires on change rather than per frame.
         const char* _lastLegGateReason = "";
         void restoreNodesToDefault();
