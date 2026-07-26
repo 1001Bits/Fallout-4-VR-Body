@@ -114,23 +114,54 @@ decoded. It rebuilds several scrap arrays, which is very likely where the bone i
 map used by `vf023` is built. Calling it directly is untested and is not a safe blind
 change — it tears down and rebuilds graph state.
 
-## Unresolved — must be answered before implementing
+## The sync is first-person arms onto the body — not animated legs
 
-1. **Which bones the map covers.** If the index map only spans the upper body, the
-   legs are never animated and a procedural gait remains unavoidable. This is the
-   single question that decides the whole design and it is still open.
-   `TESObjectREFR::PopulateGraphNodesToTarget` is *not* the source — it only appends
-   `Get3D(thirdPerson)`, a single root node. The map is most likely built inside
-   `SwitchBehaviorGraph`. It is runtime data, so confirming its contents realistically
-   needs a debugger attached to a running game rather than static analysis.
-2. **Hook ordering.** Whether FRIK's current hook runs before or after `vf023`, and
-   whether the third-person tree is culled or otherwise skipped in VR.
-3. **Whether the animated pose survives.** FRIK's rest-pose reset exists because
-   "loading a game does NOT reset the skeleton nodes", which suggests those bones are
-   *not* being rewritten each frame. That is in tension with an active per-frame sync.
-   The likely resolution is that the gate bit is *set* in VR (first-person graph, no
-   sync), which is exactly why the author saw a static third-person skeleton — but
-   that has not been confirmed.
+The map is built by `PlayerCharacter::Generate1stTo3rdBoneMap` (`0x00f09150`), and the
+member it fills is literally named `boneMapping1stTo3rd`, a `BSTArray<BSTTuple<int,int>>`:
+
+```c
+void Generate1stTo3rdBoneMap(this, node, tree1st, tree3rd, excludeNode)
+{
+    if (node->collisionObject != nullptr && node != excludeNode) {
+        idx3rd = BSFlattenedBoneTree::GetBoneIndex(tree3rd, node->name);
+        idx1st = BSFlattenedBoneTree::GetBoneIndex(tree1st, node->name);
+        if (both valid and in range)
+            boneMapping1stTo3rd.Add({ idx1st, idx3rd });
+    }
+    for (child : node->children) Generate1stTo3rdBoneMap(this, child, ...);  // recurse
+}
+```
+
+It is not a fixed upper-body list — it is a full recursive walk. But a node only
+enters the map if it satisfies **all three** of: it has a non-null `collisionObject`,
+it is not the excluded node, and **its name resolves in both bone trees**.
+
+That last condition is the ceiling. The tuple order `{idx1st, idx3rd}` matches how
+`vf023` consumes it — first element indexes the source tree, second the destination —
+so the data flows **first-person → third-person**. The map therefore cannot contain
+anything absent from the *first-person* skeleton, which in Fallout 4 is arms and hands,
+not legs. FRIK's own code agrees: it only ever looks up `RArm_Hand` / `LArm_Hand` in
+`getFirstPersonSkeleton()` and takes every leg bone from the third-person root instead.
+
+**Conclusion: this mechanism copies the animated first-person arm pose onto the
+visible body's arms. It will never deliver animated legs.** A procedural gait remains
+necessary in Fallout 4 VR, so investment belongs in `Skeleton::walk()` rather than in
+trying to switch this path on.
+
+This is the substantive difference from Skyrim, where VRIK gets a fully animated
+third-person body for free and only has to correct it.
+
+## Still unresolved
+
+1. **Whether the third-person behavior graph can drive the body directly.** The gate
+   bit and `SwitchBehaviorGraph` select which graph runs; whether making the
+   third-person graph active causes the third-person skeleton to be animated *directly*
+   (rather than merely enabling this arm copy) is untested. This is the only remaining
+   route to animated legs, and it is unproven — `SwitchBehaviorGraph` is 2006 bytes,
+   not fully decoded, and tears down and rebuilds graph state.
+2. **Hook ordering.** Whether FRIK's current hook runs before or after `vf023`.
+   This matters regardless: if it runs before, FRIK's arm IK may be getting partly
+   overwritten by the arm copy.
 
 ## Additional verified addresses
 
@@ -138,6 +169,11 @@ change — it tears down and rebuilds graph state.
 |---|---|---|
 | `PlayerCharacter::SwitchBehaviorGraph` | `0x00f2a180` | 2006 |
 | `PlayerCharacter::DoShow1stPerson` | `0x00f299d0` | 1717 |
+| `PlayerCharacter::Generate1stTo3rdBoneMap` | `0x00f09150` | 289 |
+| `BSFlattenedBoneTree::GetBoneIndex` | `0x01c20c80` | — |
+
+`PlayerCharacter::boneMapping1stTo3rd` lives at player-relative `0x1238` (pointer) with
+its count at `0x1248`; `PlayerCharacter::Set3D` and `vf134` also maintain those fields.
 
 ## Verified addresses (F4VR 1.2.72)
 
