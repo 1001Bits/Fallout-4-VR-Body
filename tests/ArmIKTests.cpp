@@ -175,6 +175,36 @@ int main()
     const auto zeroBasis = solveArm(zeroBasisInput, zeroBasisState);
     require(zeroBasis.valid && isFinite(zeroBasis.elbow), "degenerate tracking axes use finite fallbacks");
 
+    // The elbow must lie in the plane perpendicular to the reach axis, otherwise the
+    // two-bone triangle does not close and both segments end up the wrong length.
+    // Sweeping reach directions exercises the pole fallbacks, including the
+    // anatomical fixed direction itself, where the plane projection is degenerate.
+    {
+        const Vec3 outwardAxis{ 1.0f, 0.0f, 0.0f };
+        const Vec3 forwardAxis{ 0.0f, 1.0f, 0.0f };
+        const Vec3 upAxis{ 0.0f, 0.0f, 1.0f };
+        const Vec3 fixedDirection = safeNormalize(outwardAxis * 0.133f - upAxis * 0.443f - forwardAxis * 0.886f);
+
+        const std::array<Vec3, 8> directions{ fixedDirection, fixedDirection * -1.0f, upAxis, upAxis * -1.0f, outwardAxis, forwardAxis, forwardAxis * -1.0f,
+            safeNormalize({ 0.3f, 0.5f, -0.8f }) };
+
+        for (const auto& direction : directions) {
+            for (const float distance : { 6.0f, 18.0f, 28.0f, 30.9f }) {
+                auto sweepInput = makeInput();
+                sweepInput.hand = direction * distance;
+                ArmContinuityState sweepState;
+                const auto sweep = solveArm(sweepInput, sweepState);
+                require(sweep.valid, "swept reach direction solves");
+                require(close(length(sweep.elbow - sweepInput.shoulder), sweep.upperLength, 0.02f), "swept solve preserves upper length");
+                const auto sweptHand = sweepInput.shoulder + safeNormalize(sweepInput.hand - sweepInput.shoulder) * sweep.solvedReach;
+                require(close(length(sweptHand - sweep.elbow), sweep.lowerLength, 0.02f), "swept solve preserves lower length");
+                // The pole spans the triangle's height, so any component along the
+                // reach axis directly corrupts both segment lengths.
+                require(std::abs(dot(sweep.pole, safeNormalize(sweepInput.hand - sweepInput.shoulder))) < 0.01f, "pole stays perpendicular to the reach axis");
+            }
+        }
+    }
+
     // Exponential smoothing composes consistently across common VR refresh rates.
     constexpr std::array refreshRates{ 45, 72, 90, 120 };
     const float reference = smoothForOneSecond(refreshRates.front());

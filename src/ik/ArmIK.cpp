@@ -26,6 +26,31 @@ namespace
 
     frik::ik::Vec3 lerp(const frik::ik::Vec3& from, const frik::ik::Vec3& to, const float amount) { return from + (to - from) * clamp01(amount); }
 
+    /**
+     * A unit vector perpendicular to `axis`, preferring `preferred`.
+     *
+     * The pole spans the two-bone triangle's height, so any component along the
+     * reach axis stops both segments from keeping their length. Falling back to an
+     * unprojected vector silently breaks that invariant, so every candidate is
+     * projected first. `axis` must be a unit vector.
+     */
+    frik::ik::Vec3 perpendicularTo(const frik::ik::Vec3& preferred, const frik::ik::Vec3& axis, const frik::ik::Vec3& fallbackA, const frik::ik::Vec3& fallbackB,
+        const frik::ik::Vec3& fallbackC)
+    {
+        for (const auto& candidate : { preferred, fallbackA, fallbackB, fallbackC }) {
+            const auto projected = projectOnPlane(candidate, axis);
+            const float projectedLength = frik::ik::length(projected);
+            if (projectedLength > kEpsilon) {
+                return projected / projectedLength;
+            }
+        }
+
+        // The supplied directions were all parallel to the axis. A unit axis cannot
+        // be parallel to both world X and world Y, so one of them always works.
+        const frik::ik::Vec3 basis = std::abs(axis.x) < 0.9f ? frik::ik::Vec3{ 1.0f, 0.0f, 0.0f } : frik::ik::Vec3{ 0.0f, 1.0f, 0.0f };
+        return frik::ik::safeNormalize(projectOnPlane(basis, axis), { 0.0f, 0.0f, 1.0f });
+    }
+
     frik::ik::Vec3 rotateAroundAxis(const frik::ik::Vec3& value, const frik::ik::Vec3& axis, const float angle)
     {
         const float sine = std::sin(angle);
@@ -220,7 +245,10 @@ namespace frik::ik
 
         Vec3 previousPole = continuity.hasPole ? projectOnPlane(continuity.pole, reachAxis) : Vec3{};
         const Vec3 fixedDirection = safeNormalize(outward * 0.133f - up * 0.443f - forward * 0.886f);
-        const Vec3 fixedPole = safeNormalize(projectOnPlane(fixedDirection, reachAxis), outward);
+        // Reaching exactly along the anatomical fixed direction makes its in-plane
+        // projection vanish; the fallback must still be perpendicular to the reach
+        // axis or the elbow leaves the solution plane entirely.
+        const Vec3 fixedPole = perpendicularTo(fixedDirection, reachAxis, outward, up, forward);
 
         Vec3 baseUp = projectOnPlane(up, reachAxis);
         if (length(baseUp) <= kEpsilon) {
