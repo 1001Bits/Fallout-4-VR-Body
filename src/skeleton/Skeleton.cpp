@@ -22,6 +22,8 @@ namespace
     constexpr float kVectorEpsilon = 0.0001f;
     constexpr float kMaximumTrackedPosition = 1000000.0f;
     constexpr float kTrackingDiscontinuityDistance = 100.0f;
+    constexpr float kDirectionChangeDelaySeconds = 2.0f / 90.0f;
+    constexpr float kStepRetargetDeceleration = -20.0f * 90.0f;
 
     bool isFinite(const RE::NiPoint3& point)
     {
@@ -86,6 +88,30 @@ namespace
     bool tryNormalizePlanar(const RE::NiPoint3& input, RE::NiPoint3& output)
     {
         return tryNormalize(RE::NiPoint3(input.x, input.y, 0.0f), output);
+    }
+
+    bool tryLawOfCosinesAngle(
+        const float adjacentA,
+        const float adjacentB,
+        const float opposite,
+        float& angle)
+    {
+        if (!std::isfinite(adjacentA) || !std::isfinite(adjacentB) || !std::isfinite(opposite) ||
+            adjacentA <= kVectorEpsilon || adjacentB <= kVectorEpsilon || opposite < 0.0f) {
+            return false;
+        }
+
+        const float denominator = 2.0f * adjacentA * adjacentB;
+        if (!std::isfinite(denominator) || denominator <= kVectorEpsilon) {
+            return false;
+        }
+
+        const float cosine = std::clamp(
+            (adjacentA * adjacentA + adjacentB * adjacentB - opposite * opposite) / denominator,
+            -1.0f,
+            1.0f);
+        angle = std::acos(cosine);
+        return std::isfinite(angle);
     }
 
     bool approximatelyEqual(const RE::NiPoint3& lhs, const RE::NiPoint3& rhs)
@@ -165,6 +191,12 @@ namespace frik
         _com = findNode(_root, "COM");
         _neck = findNode(_root, "Neck");
         _spine1 = findNode(_root, "SPINE1");
+        _leftLeg.hip = findNode(_root, "LLeg_Thigh");
+        _leftLeg.knee = findNode(_root, "LLeg_Calf");
+        _leftLeg.foot = findNode(_root, "LLeg_Foot");
+        _rightLeg.hip = findNode(_root, "RLeg_Thigh");
+        _rightLeg.knee = findNode(_root, "RLeg_Calf");
+        _rightLeg.foot = findNode(_root, "RLeg_Foot");
 
         // Setup Arms
         initArmsNodes();
@@ -233,13 +265,10 @@ namespace frik
         }
 
         const auto pelvis = findNode(_root, "Pelvis");
-        const auto thigh = findNode(_root, "LLeg_Thigh");
-        const auto calf = findNode(_root, "LLeg_Calf");
-        const auto foot = findNode(_root, "LLeg_Foot");
-        if (pelvis && thigh && calf && foot) {
-            _legLen = MatrixUtils::vec3Len(thigh->world.translate - pelvis->world.translate);
-            _legLen += MatrixUtils::vec3Len(calf->world.translate - thigh->world.translate);
-            _legLen += MatrixUtils::vec3Len(foot->world.translate - calf->world.translate);
+        if (pelvis && _leftLeg.hip && _leftLeg.knee && _leftLeg.foot) {
+            _legLen = MatrixUtils::vec3Len(_leftLeg.hip->world.translate - pelvis->world.translate);
+            _legLen += MatrixUtils::vec3Len(_leftLeg.knee->world.translate - _leftLeg.hip->world.translate);
+            _legLen += MatrixUtils::vec3Len(_leftLeg.foot->world.translate - _leftLeg.knee->world.translate);
         }
     }
 
@@ -288,15 +317,20 @@ namespace frik
         setBodyPosture(neckPitch);
         updateDownFromRoot(); // Do world update now so that IK calculations have proper world reference
 
-        logger::trace("Set knee posture...");
-        setKneePos();
+        _solveLegsThisFrame = canUseProceduralLegs();
+        if (_solveLegsThisFrame) {
+            logger::trace("Set knee posture...");
+            setKneePos();
+        }
 
         logger::trace("Set walk...");
         walk();
 
-        logger::trace("Set legs...");
-        setSingleLeg(false);
-        setSingleLeg(true);
+        if (_solveLegsThisFrame) {
+            logger::trace("Set legs...");
+            setSingleLeg(false);
+            setSingleLeg(true);
+        }
 
         // Do another update before setting arms
         updateDownFromRoot(); // Do world update now so that IK calculations have proper world reference
@@ -438,18 +472,59 @@ namespace frik
     void Skeleton::resetMotionState()
     {
         _lastPosition = _curentPosition;
-        _prevSpeed = 0.0f;
-        _walkingState = 0;
-        _currentStepTime = 0.0f;
-        _stepTimeinStep = 0.0f;
-        _footStepping = 0;
-        _delayFrame = 0;
-        _stepDir = _forwardDir;
+        resetWalkingState();
 
         // The damped objects are weapon offset nodes, not the first-person
         // hand bones cached above.  Prime from the actual node on its next use.
         _rightHandDampingPrimed = false;
         _leftHandDampingPrimed = false;
+    }
+
+    void Skeleton::resetWalkingState()
+    {
+        _prevSpeed = 0.0f;
+        _walkingState = 0;
+        _currentStepTime = 0.0f;
+        _stepTimeinStep = 0.0f;
+        _footStepping = 0;
+        _directionChangeDelayRemaining = 0.0f;
+        _spineAngle = 0.0f;
+        _stepDir = _forwardDir;
+        _solveLegsThisFrame = false;
+    }
+
+    bool Skeleton::canUseProceduralLegs() const
+    {
+        const auto player = RE::PlayerCharacter::GetSingleton();
+        const bool legNodesAvailable =
+            _leftLeg.hip && _leftLeg.knee && _leftLeg.foot &&
+            _rightLeg.hip && _rightLeg.knee && _rightLeg.foot;
+        if (!player || !legNodesAvailable ||
+            g_config.isPlayingSeated || g_frik.isPauseMenuOpen()) {
+            return false;
+        }
+
+        if (player->IsDead(false) ||
+            static_cast<RE::LIFE_STATE>(player->lifeState) != RE::LIFE_STATE::kAlive ||
+            player->knockState != 0 ||
+            player->DoGetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal ||
+            isJumpingOrInAir() || isSwimming(player) || isUnderwater(player)) {
+            return false;
+        }
+
+        const auto playerCamera = getPlayerCamera();
+        if (playerCamera && playerCamera->cameraState) {
+            const auto cameraState = playerCamera->cameraState->stateID;
+            if (cameraState == F4SEVR::PlayerCamera::kCameraState_VATS ||
+                cameraState == F4SEVR::PlayerCamera::kCameraState_Furniture ||
+                cameraState == F4SEVR::PlayerCamera::kCameraState_Horse ||
+                cameraState == F4SEVR::PlayerCamera::kCameraState_Bleedout ||
+                cameraState == F4SEVR::PlayerCamera::kCameraState_Dialogue) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     bool Skeleton::hasRequiredNodes() const
@@ -656,14 +731,12 @@ namespace frik
             MatrixUtils::degreesToRads(-85.0f),
             MatrixUtils::degreesToRads(85.0f));
 
-        const auto leftCalf = findNode(_com, "LLeg_Calf");
-        const auto rightCalf = findNode(_com, "RLeg_Calf");
-        if (!leftCalf || !rightCalf) {
+        if (!_leftLeg.knee || !_rightLeg.knee) {
             return;
         }
 
-        _leftKneePos = leftCalf->world.translate;
-        _rightKneePos = rightCalf->world.translate;
+        _leftKneePos = _leftLeg.knee->world.translate;
+        _rightKneePos = _rightLeg.knee->world.translate;
 
         _com->local.translate.x = 0.0f;
         _com->local.translate.y = 0.0f;
@@ -737,21 +810,20 @@ namespace frik
 
     void Skeleton::setKneePos()
     {
-        const auto lKnee = findNode(_root, "LLeg_Calf");
-        const auto rKnee = findNode(_root, "RLeg_Calf");
-
-        if (!lKnee || !rKnee) {
+        if (!_leftLeg.knee || !_rightLeg.knee ||
+            !isFinite(_leftLeg.knee->world) || !isFinite(_rightLeg.knee->world) ||
+            !isFinite(_leftKneePos) || !isFinite(_rightKneePos)) {
             return;
         }
 
-        lKnee->world.translate.z = _leftKneePos.z;
-        rKnee->world.translate.z = _rightKneePos.z;
+        _leftLeg.knee->world.translate.z = _leftKneePos.z;
+        _rightLeg.knee->world.translate.z = _rightKneePos.z;
 
-        _leftKneePos = lKnee->world.translate;
-        _rightKneePos = rKnee->world.translate;
+        _leftKneePos = _leftLeg.knee->world.translate;
+        _rightKneePos = _rightLeg.knee->world.translate;
 
-        updateDown(lKnee, false);
-        updateDown(rKnee, false);
+        updateDown(_leftLeg.knee, false);
+        updateDown(_rightLeg.knee, false);
     }
 
     // TODO: does it do anything? check if it works at all
@@ -776,28 +848,30 @@ namespace frik
 
     void Skeleton::walk()
     {
-        const auto lHip = findNode(_root, "LLeg_Thigh");
-        const auto rHip = findNode(_root, "RLeg_Thigh");
-
-        if (!lHip || !rHip) {
+        if (!_solveLegsThisFrame) {
+            resetWalkingState();
             return;
         }
 
-        const auto lKnee = findNode(lHip, "LLeg_Calf");
-        const auto rKnee = findNode(rHip, "RLeg_Calf");
-        const auto lFoot = findNode(lHip, "LLeg_Foot");
-        const auto rFoot = findNode(rHip, "RLeg_Foot");
+        const auto lHip = _leftLeg.hip;
+        const auto rHip = _rightLeg.hip;
+        const auto lKnee = _leftLeg.knee;
+        const auto rKnee = _rightLeg.knee;
+        const auto lFoot = _leftLeg.foot;
+        const auto rFoot = _rightLeg.foot;
 
-        if (!lKnee || !rKnee || !lFoot || !rFoot) {
+        if (!lHip || !rHip || !lKnee || !rKnee || !lFoot || !rFoot) {
+            resetWalkingState();
             return;
         }
 
-        // move feet closer together
-        const RE::NiPoint3 leftToRight = _inPowerArmor
-            ? (rFoot->world.translate - lFoot->world.translate) * -0.15f
-            : (rFoot->world.translate - lFoot->world.translate) * 0.3f;
-        lFoot->world.translate += leftToRight;
-        rFoot->world.translate -= leftToRight;
+        if (!isFinite(_root->world) ||
+            !isFinite(lHip->world) || !isFinite(rHip->world) ||
+            !isFinite(lKnee->world) || !isFinite(rKnee->world) ||
+            !isFinite(lFoot->world) || !isFinite(rFoot->world)) {
+            resetWalkingState();
+            return;
+        }
 
         // want to calculate direction vector first.     Will only concern with x-y vector to start.
         RE::NiPoint3 lastPos = _lastPosition;
@@ -806,34 +880,55 @@ namespace frik
         lastPos.z = 0;
 
         RE::NiPoint3 dir = curPos - lastPos;
-
-        float curSpeed = std::clamp(abs(MatrixUtils::vec3Len(dir)) / _frameTime, 0.0f, 350.0f);
-        if (_prevSpeed > 20.0f) {
-            curSpeed = (curSpeed + _prevSpeed) / 2.0f;
+        const float movementDistance = MatrixUtils::vec3Len(dir);
+        if (!isFinite(dir) || !std::isfinite(movementDistance) || _frameTime <= kVectorEpsilon) {
+            resetWalkingState();
+            return;
         }
 
-        const float stepTime = std::clamp(cos(curSpeed / 140.0f), 0.28f, 0.50f);
-        dir = MatrixUtils::vec3Norm(dir);
+        float curSpeed = std::clamp(movementDistance / _frameTime, 0.0f, 350.0f);
+        if (_prevSpeed > 20.0f) {
+            const float speedRetention = frameRateIndependentRetention(0.5f, _frameTime);
+            curSpeed = curSpeed * (1.0f - speedRetention) + _prevSpeed * speedRetention;
+        }
 
-        // if decelerating reset target
-        if (curSpeed - _prevSpeed < -20.0f) {
+        const float stepTime = std::clamp(std::cos(curSpeed / 140.0f), 0.28f, 0.50f);
+        RE::NiPoint3 normalizedDirection;
+        if (movementDistance > kVectorEpsilon) {
+            if (!tryNormalize(dir, normalizedDirection)) {
+                resetWalkingState();
+                return;
+            }
+            dir = normalizedDirection;
+        } else if (!tryNormalizePlanar(_stepDir, dir) && !tryNormalizePlanar(_forwardDir, dir)) {
+            dir = RE::NiPoint3(0, 1, 0);
+        }
+
+        // move feet closer together after all motion inputs have validated
+        const RE::NiPoint3 leftToRight = _inPowerArmor
+            ? (rFoot->world.translate - lFoot->world.translate) * -0.15f
+            : (rFoot->world.translate - lFoot->world.translate) * 0.3f;
+        lFoot->world.translate += leftToRight;
+        rFoot->world.translate -= leftToRight;
+
+        // Preserve the old 20-units-per-90-Hz-frame behavior as a
+        // frame-rate-independent acceleration threshold.
+        const float acceleration = (curSpeed - _prevSpeed) / _frameTime;
+        if (acceleration < kStepRetargetDeceleration) {
             _walkingState = 3;
         }
 
         _prevSpeed = curSpeed;
 
-        static float spineAngle = 0.0;
-
         // setup current walking state based on velocity and previous state
-        if (!isJumpingOrInAir()) {
-            switch (_walkingState) {
+        switch (_walkingState) {
             case 0: {
                 if (curSpeed >= 35.0) {
                     _walkingState = 1; // start walking
                     _footStepping = std::rand() % 2 + 1; // pick a random foot to take a step  // NOLINT(concurrency-mt-unsafe)
                     _stepDir = dir;
                     _stepTimeinStep = stepTime;
-                    _delayFrame = 2;
+                    _directionChangeDelayRemaining = kDirectionChangeDelaySeconds;
 
                     if (_footStepping == 1) {
                         _rightFootTarget = rFoot->world.translate + _stepDir * (curSpeed * stepTime * 1.5f);
@@ -855,7 +950,7 @@ namespace frik
                 }
                 _currentStepTime = 0.0;
                 _footStepping = 0;
-                spineAngle = 0.0;
+                _spineAngle = 0.0f;
                 break;
             }
             case 1: {
@@ -886,9 +981,6 @@ namespace frik
                 _walkingState = 0;
                 break;
             }
-            }
-        } else {
-            _walkingState = 0;
         }
 
         if (_walkingState == 0) {
@@ -898,33 +990,45 @@ namespace frik
             _leftFootPos.z = _root->world.translate.z;
             _rightFootPos.z = _root->world.translate.z;
 
+            if (!isFinite(_leftFootPos) || !isFinite(_rightFootPos)) {
+                resetWalkingState();
+            }
             return;
         }
         if (_walkingState == 1) {
             RE::NiPoint3 dirOffset = dir - _stepDir;
             const float dot = MatrixUtils::vec3Dot(dir, _stepDir);
             const float scale = (std::min)(curSpeed * stepTime * 1.5f, 140.0f);
+            if (!isFinite(dirOffset) || !std::isfinite(dot) || !std::isfinite(scale) ||
+                !isFinite(_leftFootTarget) || !isFinite(_rightFootTarget) ||
+                !isFinite(_leftFootStart) || !isFinite(_rightFootStart)) {
+                resetWalkingState();
+                return;
+            }
             dirOffset = dirOffset * scale;
 
             float sign = 1.0f;
 
             _currentStepTime += _frameTime;
 
-            const float frameStep = _frameTime / _stepTimeinStep;
-            const float interp = std::clamp(frameStep * (_currentStepTime / _frameTime), 0.0f, 1.0f);
+            if (!std::isfinite(_stepTimeinStep) || _stepTimeinStep <= kVectorEpsilon) {
+                resetWalkingState();
+                return;
+            }
+            const float interp = std::clamp(_currentStepTime / _stepTimeinStep, 0.0f, 1.0f);
 
             if (_footStepping == 1) {
                 sign = -1.0f;
                 if (dot < 0.9) {
-                    if (!_delayFrame) {
+                    _directionChangeDelayRemaining =
+                        std::max(0.0f, _directionChangeDelayRemaining - _frameTime);
+                    if (_directionChangeDelayRemaining <= 0.0f) {
                         _rightFootTarget += dirOffset;
                         _stepDir = dir;
-                        _delayFrame = 2;
-                    } else {
-                        _delayFrame--;
+                        _directionChangeDelayRemaining = kDirectionChangeDelaySeconds;
                     }
                 } else {
-                    _delayFrame = _delayFrame == 2 ? _delayFrame : _delayFrame + 1;
+                    _directionChangeDelayRemaining = kDirectionChangeDelaySeconds;
                 }
                 _rightFootTarget.z = _root->world.translate.z;
                 _rightFootStart.z = _root->world.translate.z;
@@ -935,15 +1039,15 @@ namespace frik
                 _rightFootPos.z += up;
             } else {
                 if (dot < 0.9f) {
-                    if (!_delayFrame) {
+                    _directionChangeDelayRemaining =
+                        std::max(0.0f, _directionChangeDelayRemaining - _frameTime);
+                    if (_directionChangeDelayRemaining <= 0.0f) {
                         _leftFootTarget += dirOffset;
                         _stepDir = dir;
-                        _delayFrame = 2;
-                    } else {
-                        _delayFrame--;
+                        _directionChangeDelayRemaining = kDirectionChangeDelaySeconds;
                     }
                 } else {
-                    _delayFrame = _delayFrame == 2 ? _delayFrame : _delayFrame + 1;
+                    _directionChangeDelayRemaining = kDirectionChangeDelaySeconds;
                 }
                 _leftFootTarget.z = _root->world.translate.z;
                 _leftFootStart.z = _root->world.translate.z;
@@ -954,9 +1058,15 @@ namespace frik
                 _leftFootPos.z += up;
             }
 
-            spineAngle = sign * sinf(interp * std::numbers::pi_v<float>) * 3.0f;
+            if (!isFinite(_leftFootPos) || !isFinite(_rightFootPos) ||
+                !isFinite(_leftFootTarget) || !isFinite(_rightFootTarget)) {
+                resetWalkingState();
+                return;
+            }
 
-            _spine->local.rotate = MatrixUtils::getMatrixFromEulerAngles(MatrixUtils::degreesToRads(spineAngle), 0.0f, 0.0f) * _spine->local.rotate;
+            _spineAngle = sign * sinf(interp * std::numbers::pi_v<float>) * 3.0f;
+
+            _spine->local.rotate = MatrixUtils::getMatrixFromEulerAngles(MatrixUtils::degreesToRads(_spineAngle), 0.0f, 0.0f) * _spine->local.rotate;
 
             if (_currentStepTime > stepTime) {
                 _currentStepTime = 0.0;
@@ -979,6 +1089,10 @@ namespace frik
         if (_walkingState == 2) {
             _leftFootPos = lFoot->world.translate;
             _rightFootPos = rFoot->world.translate;
+            if (!isFinite(_leftFootPos) || !isFinite(_rightFootPos)) {
+                resetWalkingState();
+                return;
+            }
             _walkingState = 0;
         }
     }
@@ -986,14 +1100,30 @@ namespace frik
     // adapted solver from VRIK.  Thanks prog!
     void Skeleton::setSingleLeg(const bool isLeft) const
     {
-        const auto footNode = isLeft ? findNode(_root, "LLeg_Foot") : findNode(_root, "RLeg_Foot");
-        const auto kneeNode = isLeft ? findNode(_root, "LLeg_Calf") : findNode(_root, "RLeg_Calf");
-        const auto hipNode = isLeft ? findNode(_root, "LLeg_Thigh") : findNode(_root, "RLeg_Thigh");
+        const auto leg = isLeft ? _leftLeg : _rightLeg;
+        const auto footNode = leg.foot;
+        const auto kneeNode = leg.knee;
+        const auto hipNode = leg.hip;
+        if (!footNode || !kneeNode || !hipNode || !hipNode->parent ||
+            !isFinite(footNode->local) || !isFinite(footNode->world) ||
+            !isFinite(kneeNode->local) || !isFinite(kneeNode->world) ||
+            !isFinite(hipNode->local) || !isFinite(hipNode->world) ||
+            !isFinite(hipNode->parent->world)) {
+            return;
+        }
 
         const RE::NiPoint3 footPos = isLeft ? _leftFootPos : _rightFootPos;
         const RE::NiPoint3 hipPos = hipNode->world.translate;
-
         const RE::NiPoint3 footToHip = hipNode->world.translate - footPos;
+        if (!isFinite(footPos) || !isFinite(hipPos) || !isFinite(footToHip)) {
+            return;
+        }
+
+        const float rawFootToHipLength = MatrixUtils::vec3Len(footToHip);
+        RE::NiPoint3 xDir;
+        if (!std::isfinite(rawFootToHipLength) || !tryNormalize(footToHip, xDir)) {
+            return;
+        }
 
         auto rotV = RE::NiPoint3(0, 1, 0);
         if (_inPowerArmor) {
@@ -1001,62 +1131,140 @@ namespace frik
             rotV.z = isLeft ? 1.0f : -1.0f;
         }
         const RE::NiPoint3 hipDir = hipNode->world.rotate.Transpose() * (rotV);
-        const RE::NiPoint3 xDir = MatrixUtils::vec3Norm(footToHip);
-        const RE::NiPoint3 yDir = MatrixUtils::vec3Norm(hipDir - xDir * MatrixUtils::vec3Dot(hipDir, xDir));
+        RE::NiPoint3 yDir;
+        RE::NiPoint3 projectedBendDirection =
+            hipDir - xDir * MatrixUtils::vec3Dot(hipDir, xDir);
+        if (!tryNormalize(projectedBendDirection, yDir)) {
+            // Full extension makes the original pole direction ambiguous.
+            // Prefer the body-forward plane, then a stable world axis.
+            const RE::NiPoint3 bodyForward(_forwardDir.x, _forwardDir.y, 0.0f);
+            projectedBendDirection =
+                bodyForward - xDir * MatrixUtils::vec3Dot(bodyForward, xDir);
+            if (!tryNormalize(projectedBendDirection, yDir)) {
+                const RE::NiPoint3 fallbackAxis =
+                    std::abs(xDir.z) < 0.9f ? RE::NiPoint3(0, 0, 1) : RE::NiPoint3(0, 1, 0);
+                projectedBendDirection =
+                    fallbackAxis - xDir * MatrixUtils::vec3Dot(fallbackAxis, xDir);
+                if (!tryNormalize(projectedBendDirection, yDir)) {
+                    return;
+                }
+            }
+        }
 
         const float thighLenOrig = MatrixUtils::vec3Len(kneeNode->local.translate);
         const float calfLenOrig = MatrixUtils::vec3Len(footNode->local.translate);
+        if (!std::isfinite(thighLenOrig) || !std::isfinite(calfLenOrig) ||
+            thighLenOrig <= kVectorEpsilon || calfLenOrig <= kVectorEpsilon) {
+            return;
+        }
+
         float thighLen = thighLenOrig;
         float calfLen = calfLenOrig;
 
-        const float ftLen = (std::max)(MatrixUtils::vec3Len(footToHip), 0.1f);
+        const float ftLen = std::max(rawFootToHipLength, 0.1f);
 
         if (ftLen > thighLen + calfLen) {
             const float diff = ftLen - thighLen - calfLen;
-            const float ratio = calfLen / (calfLen + thighLen);
+            const float combinedLength = calfLen + thighLen;
+            if (!std::isfinite(diff) || combinedLength <= kVectorEpsilon) {
+                return;
+            }
+            const float ratio = calfLen / combinedLength;
             calfLen += ratio * diff + 0.1f;
             thighLen += (1.0f - ratio) * diff + 0.1f;
         }
-        // Use the law of cosines to calculate the angle the calf must bend to reach the knee position
-        // In cases where this is impossible (foot too close to thigh), then set calfLen = thighLen so
-        // there is always a solution
-        float footAngle = acosf((calfLen * calfLen + ftLen * ftLen - thighLen * thighLen) / (2 * calfLen * ftLen));
-        if (std::isnan(footAngle) || std::isinf(footAngle)) {
-            calfLen = thighLen = (thighLenOrig + calfLenOrig) / 2.0f;
-            footAngle = acosf((calfLen * calfLen + ftLen * ftLen - thighLen * thighLen) / (2 * calfLen * ftLen));
-        }
 
-        BodyAdjustmentSubConfigMode::updateLegSlack((thighLenOrig + calfLenOrig) - ftLen);
+        // Clamp the cosine before acos.  This covers unreachable targets and
+        // floating-point drift at full extension without producing NaNs.
+        float footAngle = 0.0f;
+        if (!tryLawOfCosinesAngle(calfLen, ftLen, thighLen, footAngle)) {
+            return;
+        }
 
         // Get the desired world coordinate of the knee
         const float xDist = cosf(footAngle) * calfLen;
         const float yDist = sinf(footAngle) * calfLen;
         const RE::NiPoint3 kneePos = footPos + xDir * xDist + yDir * yDist;
+        if (!std::isfinite(xDist) || !std::isfinite(yDist) || !isFinite(kneePos)) {
+            return;
+        }
 
         const RE::NiPoint3 pos = kneePos - hipPos;
-        RE::NiPoint3 uLocalDir = hipNode->world.rotate * (MatrixUtils::vec3Norm(pos) / hipNode->world.scale);
-        hipNode->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(uLocalDir, kneeNode->local.translate) * hipNode->local.rotate;
+        RE::NiPoint3 normalizedHipToKnee;
+        if (!tryNormalize(pos, normalizedHipToKnee)) {
+            return;
+        }
+        const RE::NiPoint3 upperLocalDirection =
+            hipNode->world.rotate * normalizedHipToKnee;
+        const RE::NiMatrix3 hipLocalRotate =
+            MatrixUtils::getMatrixFromRotateVectorVec(upperLocalDirection, kneeNode->local.translate) *
+            hipNode->local.rotate;
+        if (!isFinite(upperLocalDirection) || !isFinite(hipLocalRotate)) {
+            return;
+        }
 
-        const RE::NiMatrix3 hipWR = hipNode->local.rotate * hipNode->parent->world.rotate;
+        const RE::NiMatrix3 hipWR = hipLocalRotate * hipNode->parent->world.rotate;
+        if (!isFinite(hipWR)) {
+            return;
+        }
 
-        RE::NiMatrix3 calfWR = kneeNode->local.rotate * hipWR;
+        const RE::NiMatrix3 baseCalfWR = kneeNode->local.rotate * hipWR;
 
-        uLocalDir = calfWR * (MatrixUtils::vec3Norm(footPos - kneePos) / kneeNode->world.scale);
-        kneeNode->local.rotate = MatrixUtils::getMatrixFromRotateVectorVec(uLocalDir, footNode->local.translate) * kneeNode->local.rotate;
+        RE::NiPoint3 normalizedKneeToFoot;
+        if (!tryNormalize(footPos - kneePos, normalizedKneeToFoot)) {
+            return;
+        }
+        const RE::NiPoint3 calfLocalDirection =
+            baseCalfWR * normalizedKneeToFoot;
+        const RE::NiMatrix3 kneeLocalRotate =
+            MatrixUtils::getMatrixFromRotateVectorVec(calfLocalDirection, footNode->local.translate) *
+            kneeNode->local.rotate;
+        if (!isFinite(calfLocalDirection) || !isFinite(kneeLocalRotate)) {
+            return;
+        }
 
-        calfWR = kneeNode->local.rotate * hipWR;
+        const RE::NiMatrix3 calfWR = kneeLocalRotate * hipWR;
+        if (!isFinite(calfWR)) {
+            return;
+        }
 
         // Calculate Clp:  Cwp = Twp + Twr * (Clp * Tws) = kneePos   ===>   Clp = Twr' * (kneePos - Twp) / Tws
-        kneeNode->local.translate = hipWR * ((kneePos - hipPos) / hipNode->world.scale);
-        if (MatrixUtils::vec3Len(kneeNode->local.translate) > thighLenOrig) {
-            kneeNode->local.translate = MatrixUtils::vec3Norm(kneeNode->local.translate) * thighLenOrig;
+        RE::NiPoint3 kneeLocalTranslate =
+            hipWR * ((kneePos - hipPos) / hipNode->world.scale);
+        const float computedThighLength = MatrixUtils::vec3Len(kneeLocalTranslate);
+        if (!isFinite(kneeLocalTranslate) || !std::isfinite(computedThighLength)) {
+            return;
+        }
+        if (computedThighLength > thighLenOrig) {
+            RE::NiPoint3 normalizedKneeLocal;
+            if (!tryNormalize(kneeLocalTranslate, normalizedKneeLocal)) {
+                return;
+            }
+            kneeLocalTranslate = normalizedKneeLocal * thighLenOrig;
         }
 
         // Calculate Flp:  Fwp = Cwp + Cwr * (Flp * Cws) = footPos   ===>   Flp = Cwr' * (footPos - Cwp) / Cws
-        footNode->local.translate = calfWR * ((footPos - kneePos) / kneeNode->world.scale);
-        if (MatrixUtils::vec3Len(footNode->local.translate) > calfLenOrig) {
-            footNode->local.translate = MatrixUtils::vec3Norm(footNode->local.translate) * calfLenOrig;
+        RE::NiPoint3 footLocalTranslate =
+            calfWR * ((footPos - kneePos) / kneeNode->world.scale);
+        const float computedCalfLength = MatrixUtils::vec3Len(footLocalTranslate);
+        if (!isFinite(footLocalTranslate) || !std::isfinite(computedCalfLength)) {
+            return;
         }
+        if (computedCalfLength > calfLenOrig) {
+            RE::NiPoint3 normalizedFootLocal;
+            if (!tryNormalize(footLocalTranslate, normalizedFootLocal)) {
+                return;
+            }
+            footLocalTranslate = normalizedFootLocal * calfLenOrig;
+        }
+
+        // Commit only after the complete candidate pose validates.
+        hipNode->local.rotate = hipLocalRotate;
+        kneeNode->local.rotate = kneeLocalRotate;
+        kneeNode->local.translate = kneeLocalTranslate;
+        footNode->local.translate = footLocalTranslate;
+
+        BodyAdjustmentSubConfigMode::updateLegSlack((thighLenOrig + calfLenOrig) - ftLen);
     }
 
     void Skeleton::rotateLeg(const uint32_t pos, const float angle) const

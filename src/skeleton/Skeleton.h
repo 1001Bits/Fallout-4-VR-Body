@@ -21,6 +21,13 @@ namespace frik
         RE::NiAVObject* hand = nullptr;
     };
 
+    struct LegNodes
+    {
+        RE::NiNode* hip = nullptr;
+        RE::NiNode* knee = nullptr;
+        RE::NiNode* foot = nullptr;
+    };
+
     /**
      * One coherent HMD sample used by every body-IK calculation in a frame.
      *
@@ -73,7 +80,9 @@ namespace frik
         void setTime();
         bool sampleTrackedHeadPose();
         void resetMotionState();
+        void resetWalkingState();
         bool hasRequiredNodes() const;
+        bool canUseProceduralLegs() const;
         void restoreNodesToDefault();
         void setupHead(float neckYaw, float neckPitch) const;
         void setBodyUnderHMD(float neckYaw);
@@ -148,6 +157,8 @@ namespace frik
         float _legLen = 0.0f;
         ArmNodes _rightArm;
         ArmNodes _leftArm;
+        LegNodes _rightLeg;
+        LegNodes _leftLeg;
 
         // Default transform are used to reset the skeleton before each frame update to start from scratch
         std::vector<std::pair<RE::NiAVObject*, const RE::NiTransform>> _skeletonNodesToDefaultTransforms;
@@ -173,7 +184,9 @@ namespace frik
         RE::NiPoint3 _stepDir;
         float _prevSpeed;
         float _stepTimeinStep;
-        int _delayFrame;
+        float _directionChangeDelayRemaining = 0.0f;
+        float _spineAngle = 0.0f;
+        bool _solveLegsThisFrame = false;
 
         std::map<std::string, RE::NiTransform, common::CaseInsensitiveComparator> _handBones;
         std::map<std::string, bool, common::CaseInsensitiveComparator> _closedHand;
