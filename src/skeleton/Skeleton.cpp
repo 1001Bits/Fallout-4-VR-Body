@@ -812,12 +812,15 @@ namespace frik
 
     float Skeleton::getCorrectedUprightHmdHeight() const
     {
-        if (!_hasValidTrackedHeadPose || !_playerNodes || !_playerNodes->UprightHmdNode) {
+        // playerworldnode is dereferenced below for its world rotation, so it belongs
+        // in this guard.  The per-frame path reaches here only after
+        // hasRequiredNodes(), but the guard should match what the body actually uses.
+        if (!_hasValidTrackedHeadPose || !_playerNodes || !_playerNodes->UprightHmdNode || !_playerNodes->playerworldnode) {
             return 0.0f;
         }
 
         float parentScale = 1.0f;
-        if (_playerNodes->playerworldnode && std::isfinite(_playerNodes->playerworldnode->world.scale) && std::abs(_playerNodes->playerworldnode->world.scale) > kVectorEpsilon) {
+        if (std::isfinite(_playerNodes->playerworldnode->world.scale) && std::abs(_playerNodes->playerworldnode->world.scale) > kVectorEpsilon) {
             parentScale = _playerNodes->playerworldnode->world.scale;
         }
 
@@ -840,11 +843,16 @@ namespace frik
     }
 
     /**
-     * Twist the spine about its local bone axis.  Every spine-chain bone is offset
-     * from its parent purely along local X, so X is the twist axis; this matches the
-     * convention setupHead already relies on.  The yaw applied here was taken off
-     * the avatar root, so the chest reaches the same orientation as before while the
-     * pelvis, legs, and feet stay planted.
+     * Twist the spine about its own local bone axis.  Every spine-chain bone is
+     * offset from its parent purely along local X, so X is the chain/twist axis.
+     *
+     * The euler matrix is pre-multiplied, which is what rotates a node in its own
+     * local frame under this codebase's transposed matrix convention (world =
+     * local * parentWorld).  This matches how walk() already twists this very same
+     * node for gait sway, so the two compose about one consistent axis.
+     *
+     * The yaw applied here was taken off the avatar root, so the chest reaches the
+     * same orientation as before while the pelvis, legs, and feet stay planted.
      */
     void Skeleton::applyTorsoTwist(const ik::TorsoTwist& twist) const
     {
@@ -852,7 +860,7 @@ namespace frik
             if (!node || !std::isfinite(angle) || std::abs(angle) <= kVectorEpsilon) {
                 return;
             }
-            const RE::NiMatrix3 rotated = node->local.rotate * MatrixUtils::getMatrixFromEulerAngles(angle, 0, 0);
+            const RE::NiMatrix3 rotated = MatrixUtils::getMatrixFromEulerAngles(angle, 0, 0) * node->local.rotate;
             if (isFinite(rotated) && isNearlyOrthonormal(rotated)) {
                 node->local.rotate = rotated;
             }
