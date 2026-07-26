@@ -1,5 +1,9 @@
 #pragma once
 
+#include <chrono>
+#include <vector>
+
+#include "calibration/HmdPivotCalibrator.h"
 #include "vrui/UIContainer.h"
 #include "vrui/UIToggleGroupContainer.h"
 
@@ -22,29 +26,46 @@ namespace frik
     public :
         explicit BodyAdjustmentSubConfigMode(const std::function<void()>& onClose);
 
-        void onFrameUpdate() const;
-        static void updateLegSlack(const float skeletonLegSlack) { _skeletonLegSlack = skeletonLegSlack; };
+        void onFrameUpdate();
+        static void updateLegSlack(float skeletonLegSlack);
 
     private:
         void createConfigUI();
         void clearConfigTarget();
+        void beginHmdPivotCalibration();
+        void captureHmdPivotSample();
+        bool finishHmdPivotCalibration();
+        void captureHeightSample();
+        bool finishHeightCalibration();
+        void beginArmSpanCalibration();
+        void captureArmSpanSample();
+        bool finishArmSpanCalibration();
         void togglePlayingSeated(bool seated);
         void toggleHideHeadEquipment(bool hide);
         void closeConfig();
-        void handleAdjustment() const;
-        static void handleHeightAdjustment();
+        void handleAdjustment();
+        void handleHeightAdjustment();
         static void handleForwardAdjustment();
         static void handleArmsLengthAdjustment();
         static void handleVRScaleAdjustment();
         void saveConfig();
         void resetConfig();
 
-        // roundabout way to recalculate the leg slack adjust offset by knowing the skeleton leg slack value
-        inline static float _skeletonLegSlack;
+        // The leg solver reports right then left. Pairing both values prevents
+        // one planted/bent leg from driving an unsafe whole-body correction.
+        inline static float _pendingLegSlack = 0.0f;
+        inline static float _bilateralLegSlackLow = 0.0f;
+        inline static float _bilateralLegSlackHigh = 0.0f;
+        inline static bool _hasPendingLegSlack = false;
+        inline static bool _hasBilateralLegSlack = false;
 
         std::function<void()> _onClose;
 
         BodyAdjustmentConfigTarget _configTarget = BodyAdjustmentConfigTarget::None;
+        calibration::HmdPivotCalibrator _hmdPivotCalibrator;
+        std::vector<float> _heightSamples;
+        std::vector<float> _wristSpanSamples;
+        std::chrono::steady_clock::time_point _lastLegSlackUpdate = std::chrono::steady_clock::now();
 
         // configuration UI
         std::shared_ptr<vrui::UIContainer> _configUI;

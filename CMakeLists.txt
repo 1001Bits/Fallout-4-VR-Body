@@ -179,6 +179,18 @@ target_link_options(${PROJECT_NAME}
     "$<$<CONFIG:RELEASE>:/INCREMENTAL:NO;/OPT:REF;/OPT:ICF;/DEBUG:FULL>"
 )
 
+# Engine-independent numerical tests; no Fallout/F4SE runtime is required.
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(FRIKCalibrationTests
+    tests/HmdPivotCalibratorTests.cpp
+    src/calibration/HmdPivotCalibrator.cpp
+  )
+  target_compile_features(FRIKCalibrationTests PRIVATE cxx_std_23)
+  target_include_directories(FRIKCalibrationTests PRIVATE ${SOURCE_DIR})
+  add_test(NAME HmdPivotCalibrator COMMAND FRIKCalibrationTests)
+endif()
+
 # >>> fix a warning with /Ob2 being overridden with /Ob3
 string(REPLACE "/Ob2" "/Ob3" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
 

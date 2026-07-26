@@ -24,6 +24,10 @@ namespace frik
     static const auto WEAPONS_OFFSETS_PATH = BASE_PATH + R"(\Weapons_Offsets)";
 
     constexpr float DEFAULT_CAMERA_HEIGHT = 120.4828f;
+    constexpr float DEFAULT_HMD_PIVOT_OFFSET_X = 0.0f;
+    constexpr float DEFAULT_HMD_PIVOT_OFFSET_Y = 5.5f;
+    constexpr float DEFAULT_HMD_PIVOT_OFFSET_Z = 9.0f;
+    constexpr float DEFAULT_SHOULDER_WIDTH = 27.0f;
 
     /**
      * Type of weapon related position offsets.
@@ -88,6 +92,17 @@ namespace frik
         void setPlayerHMDOffsetUp(float value);
         float getPlayerLegSlackAdjustOffset() const;
         void setPlayerLegSlackAdjustOffset(float value);
+        void setHmdPivotOffset(float x, float y, float z);
+        void resetHmdPivotOffset();
+
+        /**
+         * Solver-only anthropometric ratios. calibratedPlayerHeight is deliberately
+         * not connected to the scene graph/root scale. PlayerHeight is retained
+         * only as a deprecated migration/API value.
+         */
+        float getNormalizedShoulderWidth() const;
+        float getNormalizedLeftArmLength() const;
+        float getNormalizedRightArmLength() const;
 
         static void openInNotepad();
         RE::NiTransform getPipboyOffset();
@@ -103,6 +118,20 @@ namespace frik
         float fVrScale = 0;
         float playerHeight = 0;
         float armLength = 0;
+
+        // Solver calibration (game units; X lateral, Y forward, Z up).
+        // The pivot vector points from the anatomical neck pivot to the tracked
+        // HMD origin in HMD-local axes, so consumers subtract R * offset.
+        bool enableHmdPivotCorrection = true;
+        float hmdPivotOffsetX = DEFAULT_HMD_PIVOT_OFFSET_X;
+        float hmdPivotOffsetY = DEFAULT_HMD_PIVOT_OFFSET_Y;
+        float hmdPivotOffsetZ = DEFAULT_HMD_PIVOT_OFFSET_Z;
+        float calibratedPlayerHeight = DEFAULT_CAMERA_HEIGHT;
+        float shoulderWidth = DEFAULT_SHOULDER_WIDTH;
+        float leftArmLength = 36.74f;
+        float rightArmLength = 36.74f;
+        float hmdPivotCalibrationDuration = 10.0f;
+        float legSlackAutoAdjustRate = 3.0f;
 
         // Head Geometry Hide
         bool hideHead = false;
@@ -214,8 +243,11 @@ namespace frik
     protected:
         virtual void loadIniConfigInternal(const CSimpleIniA& ini) override;
         virtual void saveIniConfigInternal(CSimpleIniA& ini) override;
+        virtual void updateIniConfigToLatestVersionCustom(
+            int currentVersion, int latestVersion, const CSimpleIniA& oldIni, CSimpleIniA& newIni) const override;
 
     private:
+        void validateSolverCalibrationConfig();
         void loadHideMeshes();
         void loadHideEquipmentSlots();
         void loadPipboyOffsets();

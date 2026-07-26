@@ -2,6 +2,7 @@
 
 #include "Config.h"
 
+#include <cmath>
 #include <filesystem>
 
 #include "common/CommonUtils.h"
@@ -203,6 +204,34 @@ namespace frik
         }
     }
 
+    void Config::setHmdPivotOffset(const float x, const float y, const float z)
+    {
+        hmdPivotOffsetX = x;
+        hmdPivotOffsetY = y;
+        hmdPivotOffsetZ = z;
+        validateSolverCalibrationConfig();
+    }
+
+    void Config::resetHmdPivotOffset()
+    {
+        setHmdPivotOffset(DEFAULT_HMD_PIVOT_OFFSET_X, DEFAULT_HMD_PIVOT_OFFSET_Y, DEFAULT_HMD_PIVOT_OFFSET_Z);
+    }
+
+    float Config::getNormalizedShoulderWidth() const
+    {
+        return shoulderWidth / calibratedPlayerHeight;
+    }
+
+    float Config::getNormalizedLeftArmLength() const
+    {
+        return leftArmLength / calibratedPlayerHeight;
+    }
+
+    float Config::getNormalizedRightArmLength() const
+    {
+        return rightArmLength / calibratedPlayerHeight;
+    }
+
     /**
      * Open the FRIK.ini file in Notepad for editing.
      */
@@ -279,6 +308,21 @@ namespace frik
         fVrScale = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fVrScale", 70.0));
         playerHeight = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "PlayerHeight", 120.4828f));
         armLength = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "armLength", 36.74f));
+
+        // Solver-only calibration. Missing keys intentionally inherit legacy
+        // PlayerHeight/armLength to preserve proportions during migration.
+        enableHmdPivotCorrection = ini.GetBoolValue(INI_SECTION_MAIN, "bEnableHmdPivotCorrection", true);
+        hmdPivotOffsetX = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fHmdPivotOffsetX", DEFAULT_HMD_PIVOT_OFFSET_X));
+        hmdPivotOffsetY = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fHmdPivotOffsetY", DEFAULT_HMD_PIVOT_OFFSET_Y));
+        hmdPivotOffsetZ = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fHmdPivotOffsetZ", DEFAULT_HMD_PIVOT_OFFSET_Z));
+        calibratedPlayerHeight = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fCalibratedPlayerHeight", playerHeight));
+        shoulderWidth = static_cast<float>(
+            ini.GetDoubleValue(INI_SECTION_MAIN, "fShoulderWidth", DEFAULT_SHOULDER_WIDTH * calibratedPlayerHeight / DEFAULT_CAMERA_HEIGHT));
+        leftArmLength = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fLeftArmLength", armLength));
+        rightArmLength = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fRightArmLength", armLength));
+        hmdPivotCalibrationDuration = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fHmdPivotCalibrationDuration", 10.0f));
+        legSlackAutoAdjustRate = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fLegSlackAutoAdjustRate", 3.0f));
+        validateSolverCalibrationConfig();
 
         // Head Geometry Hide
         hideHead = ini.GetBoolValue(INI_SECTION_MAIN, "bHidePlayerHead");
@@ -387,6 +431,9 @@ namespace frik
 
     void Config::saveIniConfigInternal(CSimpleIniA& ini)
     {
+        // Values may have been changed by an in-game configurator since load.
+        validateSolverCalibrationConfig();
+
         ini.SetBoolValue(INI_SECTION_MAIN, "bIsPlayingSeated", isPlayingSeated);
         ini.SetDoubleValue(INI_SECTION_MAIN, "fVrScale", fVrScale);
         ini.SetBoolValue(INI_SECTION_MAIN, "bHidePlayerHead", hideHead);
@@ -412,6 +459,16 @@ namespace frik
 
         ini.SetDoubleValue(INI_SECTION_MAIN, "fSkeletonLegSlackTarget", skeletonLegSlackTarget);
         ini.SetDoubleValue(INI_SECTION_MAIN, "armLength", armLength);
+        ini.SetBoolValue(INI_SECTION_MAIN, "bEnableHmdPivotCorrection", enableHmdPivotCorrection);
+        ini.SetDoubleValue(INI_SECTION_MAIN, "fHmdPivotOffsetX", hmdPivotOffsetX);
+        ini.SetDoubleValue(INI_SECTION_MAIN, "fHmdPivotOffsetY", hmdPivotOffsetY);
+        ini.SetDoubleValue(INI_SECTION_MAIN, "fHmdPivotOffsetZ", hmdPivotOffsetZ);
+        ini.SetDoubleValue(INI_SECTION_MAIN, "fCalibratedPlayerHeight", calibratedPlayerHeight);
+        ini.SetDoubleValue(INI_SECTION_MAIN, "fShoulderWidth", shoulderWidth);
+        ini.SetDoubleValue(INI_SECTION_MAIN, "fLeftArmLength", leftArmLength);
+        ini.SetDoubleValue(INI_SECTION_MAIN, "fRightArmLength", rightArmLength);
+        ini.SetDoubleValue(INI_SECTION_MAIN, "fHmdPivotCalibrationDuration", hmdPivotCalibrationDuration);
+        ini.SetDoubleValue(INI_SECTION_MAIN, "fLegSlackAutoAdjustRate", legSlackAutoAdjustRate);
         ini.SetBoolValue(INI_SECTION_MAIN, "hidePipboy", hidePipboy);
         ini.SetDoubleValue(INI_SECTION_MAIN, "PipboyScale", pipBoyScale);
         ini.SetBoolValue(INI_SECTION_MAIN, "HoloPipBoyEnabled", isHoloPipboy);
@@ -423,6 +480,59 @@ namespace frik
         ini.SetBoolValue(INI_SECTION_MAIN, "EnableGripButton", enableGripButtonToGrap);
         ini.SetBoolValue(INI_SECTION_MAIN, "EnableGripButtonToLetGo", enableGripButtonToLetGo);
         ini.SetBoolValue(INI_SECTION_MAIN, "EnableGripButtonOnePress", onePressGripButton);
+    }
+
+    void Config::validateSolverCalibrationConfig()
+    {
+        const auto validate = [](const char* name, float& value, const float minimum, const float maximum, const float fallback) {
+            if (!std::isfinite(value) || value < minimum || value > maximum) {
+                logger::warn("Invalid solver calibration {}={} (expected {}..{}); using {}", name, value, minimum, maximum, fallback);
+                value = fallback;
+            }
+        };
+
+        validate("PlayerHeight", playerHeight, 60.0f, 250.0f, DEFAULT_CAMERA_HEIGHT);
+        validate("armLength", armLength, 15.0f, 80.0f, 36.74f);
+        validate("fHmdPivotOffsetX", hmdPivotOffsetX, -8.0f, 8.0f, DEFAULT_HMD_PIVOT_OFFSET_X);
+        validate("fHmdPivotOffsetY", hmdPivotOffsetY, 1.0f, 16.0f, DEFAULT_HMD_PIVOT_OFFSET_Y);
+        validate("fHmdPivotOffsetZ", hmdPivotOffsetZ, 2.0f, 20.0f, DEFAULT_HMD_PIVOT_OFFSET_Z);
+        validate("fCalibratedPlayerHeight", calibratedPlayerHeight, 60.0f, 250.0f, playerHeight);
+        validate("fShoulderWidth", shoulderWidth, 15.0f, 70.0f, DEFAULT_SHOULDER_WIDTH * calibratedPlayerHeight / DEFAULT_CAMERA_HEIGHT);
+        validate("fLeftArmLength", leftArmLength, 15.0f, 80.0f, armLength);
+        validate("fRightArmLength", rightArmLength, 15.0f, 80.0f, armLength);
+        validate("fHmdPivotCalibrationDuration", hmdPivotCalibrationDuration, 4.0f, 30.0f, 10.0f);
+        validate("fLegSlackAutoAdjustRate", legSlackAutoAdjustRate, 0.0f, 10.0f, 3.0f);
+    }
+
+    /**
+     * Version 17 splits solver calibration from the visual skeleton scale.
+     * Seed new solver values from legacy body settings so existing users keep
+     * their proportions while the new defaults/comments are installed.
+     */
+    void Config::updateIniConfigToLatestVersionCustom(
+        const int currentVersion, const int, const CSimpleIniA& oldIni, CSimpleIniA& newIni) const
+    {
+        if (currentVersion >= 17) {
+            return;
+        }
+
+        const auto oldHeight = static_cast<float>(oldIni.GetDoubleValue(INI_SECTION_MAIN, "PlayerHeight", DEFAULT_CAMERA_HEIGHT));
+        const auto safeHeight = std::isfinite(oldHeight) && oldHeight >= 60.0f && oldHeight <= 250.0f ? oldHeight : DEFAULT_CAMERA_HEIGHT;
+        const auto oldArmLength = static_cast<float>(oldIni.GetDoubleValue(INI_SECTION_MAIN, "armLength", 36.74f));
+        const auto safeArmLength = std::isfinite(oldArmLength) && oldArmLength >= 15.0f && oldArmLength <= 80.0f ? oldArmLength : 36.74f;
+
+        if (!oldIni.GetValue(INI_SECTION_MAIN, "fCalibratedPlayerHeight")) {
+            newIni.SetDoubleValue(INI_SECTION_MAIN, "fCalibratedPlayerHeight", safeHeight);
+        }
+        if (!oldIni.GetValue(INI_SECTION_MAIN, "fShoulderWidth")) {
+            newIni.SetDoubleValue(INI_SECTION_MAIN, "fShoulderWidth", DEFAULT_SHOULDER_WIDTH * safeHeight / DEFAULT_CAMERA_HEIGHT);
+        }
+        if (!oldIni.GetValue(INI_SECTION_MAIN, "fLeftArmLength")) {
+            newIni.SetDoubleValue(INI_SECTION_MAIN, "fLeftArmLength", safeArmLength);
+        }
+        if (!oldIni.GetValue(INI_SECTION_MAIN, "fRightArmLength")) {
+            newIni.SetDoubleValue(INI_SECTION_MAIN, "fRightArmLength", safeArmLength);
+        }
     }
 
     /**
