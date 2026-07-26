@@ -81,21 +81,63 @@ The gait should stop being synthesised and start being corrected, matching VRIK:
 3. Keep the arms/hands fully IK-driven (they must track controllers exactly).
 4. Reduce `walk()` to reading locomotion state, not generating one.
 
+## The gate selects the behavior graph
+
+The gate bit is not an obscure flag — it selects **which behavior graph the player
+runs**, which is exactly the "animation system" that has to be active for the body to
+animate. `PlayerCharacter::vf024` watches for the bit disagreeing with the graph's own
+state and switches the graph to match:
+
+```c
+lVar2 = *param_2;                                   // the animation graph
+if (lVar2 != 0 && *(int *)(lVar2 + 0x50) == 2 &&
+    ((~(uint)(*(byte *)(holder + 0x1256) >> 4) & 1) != *(uint *)(lVar2 + 0xd8))) {
+    PlayerCharacter::SwitchBehaviorGraph(holder - 0x48);
+}
+```
+
+`(~(bit >> 4) & 1)` is the *inverse* of the gate bit, so:
+
+| gate bit `0x10` | behavior graph | `vf023` bone sync |
+|---|---|---|
+| clear | third-person graph | **runs** |
+| set | first-person graph | skipped |
+
+The same `vf024` also drives `PlayerCharacter::DoShow1stPerson` from the camera state.
+
+So the sequence to get an animated body is: clear the gate bit, let `vf024` call
+`SwitchBehaviorGraph`, and `vf023` then syncs the animated pose onto the third-person
+skeleton every frame.
+
+`PlayerCharacter::SwitchBehaviorGraph` (`0x00f2a180`, 2006 bytes) has not been fully
+decoded. It rebuilds several scrap arrays, which is very likely where the bone index
+map used by `vf023` is built. Calling it directly is untested and is not a safe blind
+change — it tears down and rebuilds graph state.
+
 ## Unresolved — must be answered before implementing
 
 1. **Which bones the map covers.** If the index map only spans the upper body, the
    legs are never animated and a procedural gait remains unavoidable. This is the
-   single question that decides the whole design, and it is not yet answered.
-2. **What sets the gate bit** (`0x10` at player-relative `0x129E`). It is only ever
-   *read* in `PlayerCharacter` code — `vf012`, `vf023`, and `vf024` test or load it,
-   and nothing in that class writes it. It is presumably written elsewhere, possibly
-   as part of a wider bitfield store.
-3. **Hook ordering.** Whether FRIK's current hook runs before or after `vf023`, and
+   single question that decides the whole design and it is still open.
+   `TESObjectREFR::PopulateGraphNodesToTarget` is *not* the source — it only appends
+   `Get3D(thirdPerson)`, a single root node. The map is most likely built inside
+   `SwitchBehaviorGraph`. It is runtime data, so confirming its contents realistically
+   needs a debugger attached to a running game rather than static analysis.
+2. **Hook ordering.** Whether FRIK's current hook runs before or after `vf023`, and
    whether the third-person tree is culled or otherwise skipped in VR.
-4. **Whether the animated pose survives.** FRIK's rest-pose reset exists because
+3. **Whether the animated pose survives.** FRIK's rest-pose reset exists because
    "loading a game does NOT reset the skeleton nodes", which suggests those bones are
-   *not* being rewritten each frame. That is in tension with an active per-frame sync,
-   and the contradiction needs resolving.
+   *not* being rewritten each frame. That is in tension with an active per-frame sync.
+   The likely resolution is that the gate bit is *set* in VR (first-person graph, no
+   sync), which is exactly why the author saw a static third-person skeleton — but
+   that has not been confirmed.
+
+## Additional verified addresses
+
+| Symbol | Offset | Size |
+|---|---|---|
+| `PlayerCharacter::SwitchBehaviorGraph` | `0x00f2a180` | 2006 |
+| `PlayerCharacter::DoShow1stPerson` | `0x00f299d0` | 1717 |
 
 ## Verified addresses (F4VR 1.2.72)
 
