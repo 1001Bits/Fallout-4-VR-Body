@@ -659,7 +659,10 @@ namespace frik
         constexpr float basePitch = 105.3f;
         constexpr float weight = 0.1f;
 
-        const float curHeight = std::max(std::abs(g_config.playerHeight), kVectorEpsilon);
+        // PlayerHeight is a deprecated migration value.  The calibrated
+        // measurement participates only in dimensionless solver math and is
+        // never applied to the scene graph or weapon hierarchy.
+        const float curHeight = std::max(std::abs(g_config.calibratedPlayerHeight), kVectorEpsilon);
         const float correctedHeight = getCorrectedUprightHmdHeight() + getAdjustedPlayerHMDOffset();
         const float heightCalc = std::clamp(std::abs((curHeight - correctedHeight) / curHeight), 0.0f, 1.0f);
         const float angle = heightCalc * (basePitch + weight * MatrixUtils::radsToDegrees(neckPitch));
