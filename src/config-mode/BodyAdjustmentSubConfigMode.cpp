@@ -297,9 +297,16 @@ namespace frik
     {
         const auto axisY = vrcf::VRControllers.getThumbstickValue(vrcf::Hand::Primary).y;
         const auto adjustment = correctAdjustmentValue(axisY, 5);
-        g_config.armLength += adjustment;
-        g_config.leftArmLength += adjustment;
-        g_config.rightArmLength += adjustment;
+
+        // Keep the thumbstick inside the validated range. validateSolverCalibration
+        // Config() resets an out-of-range length to the default rather than clamping
+        // it, so without this an adjustment past the limit would silently snap arm
+        // length back to 36.74 instead of simply stopping at the limit.
+        constexpr float minimumArmLength = 15.0f;
+        constexpr float maximumArmLength = 80.0f;
+        g_config.armLength = std::clamp(g_config.armLength + adjustment, minimumArmLength, maximumArmLength);
+        g_config.leftArmLength = std::clamp(g_config.leftArmLength + adjustment, minimumArmLength, maximumArmLength);
+        g_config.rightArmLength = std::clamp(g_config.rightArmLength + adjustment, minimumArmLength, maximumArmLength);
     }
 
     void BodyAdjustmentSubConfigMode::handleVRScaleAdjustment()
