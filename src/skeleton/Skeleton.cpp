@@ -15,6 +15,7 @@
 #include "f4vr/F4VRSkelly.h"
 #include "f4vr/F4VRUtils.h"
 #include "ik/ArmIK.h"
+#include "ik/GaitSupport.h"
 #include "ik/TorsoIK.h"
 #include "world/GroundQuery.h"
 #include "vrcf/VRControllersManager.h"
@@ -29,6 +30,10 @@ namespace
     constexpr float kMaximumTrackedPosition = 1000000.0f;
     constexpr float kTrackingDiscontinuityDistance = 100.0f;
     constexpr float kDirectionChangeDelaySeconds = 2.0f / 90.0f;
+    constexpr float kStopBlendSeconds = 0.18f;
+    // How far a planted foot may drift from its rest position before it is re-planted
+    // regardless of turn, so slow drift cannot stretch a leg past its reach.
+    constexpr float kStanceFootHoldLimit = 20.0f;
     constexpr float kStepRetargetDeceleration = -20.0f * 90.0f;
 
     /**
@@ -662,6 +667,44 @@ namespace frik
         return std::clamp(groundZ, fallbackZ - maximumDrop, fallbackZ + maximumRise);
     }
 
+    /**
+     * Hold the standing feet in world space, re-planting once the body has turned far
+     * enough. Called only while standing still and only when the feature is enabled.
+     *
+     * `_leftFootPos`/`_rightFootPos` arrive holding this frame's rest-derived
+     * positions, which is what a re-plant snaps to.
+     */
+    void Skeleton::holdStanceFeet()
+    {
+        const float threshold = MatrixUtils::degreesToRads(std::clamp(g_config.turnInPlaceStepDegrees, 5.0f, 90.0f));
+
+        RE::NiPoint3 planarForward;
+        const bool haveFacing = tryNormalizePlanar(_forwardDir, planarForward);
+        const bool turned = haveFacing && _turnAccumulator.update(std::atan2(planarForward.y, planarForward.x), threshold);
+
+        // Re-plant on a turn, on first use, or if a held foot has drifted too far to
+        // still be reachable - otherwise setSingleLeg would just reject the pose.
+        const bool drifted = _stanceFeetPlanted &&
+            (MatrixUtils::vec3Len(_leftFootPos - _leftFootPlanted) > kStanceFootHoldLimit ||
+                MatrixUtils::vec3Len(_rightFootPos - _rightFootPlanted) > kStanceFootHoldLimit);
+
+        if (!_stanceFeetPlanted || turned || drifted || !haveFacing || !isFinite(_leftFootPlanted) || !isFinite(_rightFootPlanted)) {
+            _leftFootPlanted = _leftFootPos;
+            _rightFootPlanted = _rightFootPos;
+            _stanceFeetPlanted = true;
+            return;
+        }
+
+        // Keep the planted world position, but track the ground under it so a moving
+        // floor (lift, vertibird) does not leave the feet hanging.
+        _leftFootPos = _leftFootPlanted;
+        _rightFootPos = _rightFootPlanted;
+        _leftFootPos.z = groundedFootHeight(_leftFootPos, _root->world.translate.z);
+        _rightFootPos.z = groundedFootHeight(_rightFootPos, _root->world.translate.z);
+        _leftFootPlanted.z = _leftFootPos.z;
+        _rightFootPlanted.z = _rightFootPos.z;
+    }
+
     void Skeleton::resetWalkingState()
     {
         _prevSpeed = 0.0f;
@@ -673,6 +716,9 @@ namespace frik
         _spineAngle = 0.0f;
         _stepDir = _forwardDir;
         _solveLegsThisFrame = false;
+        _stopBlendElapsed = 0.0f;
+        _stanceFeetPlanted = false;
+        _turnAccumulator.reset();
     }
 
     bool Skeleton::canUseProceduralLegs() const
@@ -1142,7 +1188,10 @@ namespace frik
         case 0: {
             if (curSpeed >= 35.0) {
                 _walkingState = 1; // start walking
-                _footStepping = std::rand() % 2 + 1; // pick a random foot to take a step  // NOLINT(concurrency-mt-unsafe)
+                // Step with whichever foot is further back along the direction of
+                // travel. That is the foot which would naturally swing through, and
+                // unlike the previous std::rand() it is deterministic and thread-safe.
+                _footStepping = MatrixUtils::vec3Dot(rFoot->world.translate, dir) <= MatrixUtils::vec3Dot(lFoot->world.translate, dir) ? 1 : 2;
                 _stepDir = dir;
                 _stepTimeinStep = stepTime;
                 _directionChangeDelayRemaining = kDirectionChangeDelaySeconds;
@@ -1174,6 +1223,11 @@ namespace frik
             if (curSpeed < 20.0) {
                 _walkingState = 2; // begin process to stop walking
                 _currentStepTime = 0.0;
+                // Capture where the feet actually are so they can be blended back to
+                // the rest pose rather than teleported there.
+                _stopBlendElapsed = 0.0f;
+                _leftFootStopFrom = _leftFootPos;
+                _rightFootStopFrom = _rightFootPos;
             }
             break;
         }
@@ -1181,6 +1235,7 @@ namespace frik
             if (curSpeed >= 20.0) {
                 _walkingState = 1; // resume walking
                 _currentStepTime = 0.0;
+                _stopBlendElapsed = 0.0f;
             }
             break;
         }
@@ -1209,6 +1264,17 @@ namespace frik
 
             if (!isFinite(_leftFootPos) || !isFinite(_rightFootPos)) {
                 resetWalkingState();
+                return;
+            }
+
+            // The rest pose rotates with the body, so standing feet slide round with
+            // it instead of stepping. Hold them where they were planted and re-plant
+            // once enough turn has built up.
+            if (g_config.turnInPlaceStepDegrees > 0.0f) {
+                holdStanceFeet();
+            } else if (_stanceFeetPlanted) {
+                _stanceFeetPlanted = false;
+                _turnAccumulator.reset();
             }
             return;
         }
@@ -1300,13 +1366,31 @@ namespace frik
             return;
         }
         if (_walkingState == 2) {
-            _leftFootPos = lFoot->world.translate;
-            _rightFootPos = rFoot->world.translate;
+            // Stopping used to drop both feet onto the rest pose in a single frame,
+            // which pops every time you stop walking. Ease them back instead.
+            RE::NiPoint3 leftRest = lFoot->world.translate;
+            RE::NiPoint3 rightRest = rFoot->world.translate;
+            leftRest.z = groundedFootHeight(leftRest, _root->world.translate.z);
+            rightRest.z = groundedFootHeight(rightRest, _root->world.translate.z);
+            if (!isFinite(leftRest) || !isFinite(rightRest) || !isFinite(_leftFootStopFrom) || !isFinite(_rightFootStopFrom)) {
+                resetWalkingState();
+                return;
+            }
+
+            _stopBlendElapsed += _frameTime;
+            const float blend = ik::stopBlend(_stopBlendElapsed, kStopBlendSeconds);
+            _leftFootPos = _leftFootStopFrom + (leftRest - _leftFootStopFrom) * blend;
+            _rightFootPos = _rightFootStopFrom + (rightRest - _rightFootStopFrom) * blend;
             if (!isFinite(_leftFootPos) || !isFinite(_rightFootPos)) {
                 resetWalkingState();
                 return;
             }
-            _walkingState = 0;
+
+            if (blend >= 1.0f) {
+                _walkingState = 0;
+                _stanceFeetPlanted = false;
+                _turnAccumulator.reset();
+            }
         }
     }
 

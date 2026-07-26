@@ -134,6 +134,7 @@ namespace frik
         float legSlackAutoAdjustRate = 3.0f;
         float torsoTwistShare = 0.0f;
         bool groundAwareFeet = false;
+        float turnInPlaceStepDegrees = 0.0f;
 
         // Head Geometry Hide
         bool hideHead = false;

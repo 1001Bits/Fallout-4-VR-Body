@@ -9,6 +9,7 @@
 #include "common/CommonUtils.h"
 #include "f4vr/PlayerNodes.h"
 #include "ik/ArmIK.h"
+#include "ik/GaitSupport.h"
 #include "ik/TorsoIK.h"
 #include "vrcf/VRControllersManager.h"
 
@@ -88,6 +89,7 @@ namespace frik
         void setBodyPosture(float neckPitch);
         void setKneePos();
         void walk();
+        void holdStanceFeet();
         std::optional<float> setSingleLeg(bool isLeft) const;
         void handleLeftHandedWeaponNodesSwitch();
         void setArms(bool isLeft);
@@ -194,6 +196,20 @@ namespace frik
         float _directionChangeDelayRemaining = 0.0f;
         float _spineAngle = 0.0f;
         bool _solveLegsThisFrame = false;
+
+        // Blend the procedural feet back to the rest pose when walking stops, instead
+        // of snapping both of them there in a single frame.
+        float _stopBlendElapsed = 0.0f;
+        RE::NiPoint3 _leftFootStopFrom;
+        RE::NiPoint3 _rightFootStopFrom;
+
+        // Standing still, the feet are re-derived from the rest pose every frame and
+        // therefore rotate with the body. Holding them and re-planting after enough
+        // accumulated turn makes turning on the spot step instead of slide.
+        ik::TurnAccumulator _turnAccumulator;
+        RE::NiPoint3 _leftFootPlanted;
+        RE::NiPoint3 _rightFootPlanted;
+        bool _stanceFeetPlanted = false;
 
         std::map<std::string, RE::NiTransform, common::CaseInsensitiveComparator> _handBones;
         std::map<std::string, bool, common::CaseInsensitiveComparator> _closedHand;

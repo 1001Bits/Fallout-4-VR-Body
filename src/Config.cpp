@@ -305,6 +305,7 @@ namespace frik
         legSlackAutoAdjustRate = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fLegSlackAutoAdjustRate", 3.0f));
         torsoTwistShare = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fTorsoTwistShare", 0.0f));
         groundAwareFeet = ini.GetBoolValue(INI_SECTION_MAIN, "bGroundAwareFeet", false);
+        turnInPlaceStepDegrees = static_cast<float>(ini.GetDoubleValue(INI_SECTION_MAIN, "fTurnInPlaceStepDegrees", 0.0f));
         validateSolverCalibrationConfig();
 
         // armLength remains the authoritative compatibility alias while both
@@ -470,6 +471,7 @@ namespace frik
         ini.SetDoubleValue(INI_SECTION_MAIN, "fLegSlackAutoAdjustRate", legSlackAutoAdjustRate);
         ini.SetDoubleValue(INI_SECTION_MAIN, "fTorsoTwistShare", torsoTwistShare);
         ini.SetBoolValue(INI_SECTION_MAIN, "bGroundAwareFeet", groundAwareFeet);
+        ini.SetDoubleValue(INI_SECTION_MAIN, "fTurnInPlaceStepDegrees", turnInPlaceStepDegrees);
         ini.SetBoolValue(INI_SECTION_MAIN, "hidePipboy", hidePipboy);
         ini.SetDoubleValue(INI_SECTION_MAIN, "PipboyScale", pipBoyScale);
         ini.SetBoolValue(INI_SECTION_MAIN, "HoloPipBoyEnabled", isHoloPipboy);
@@ -505,6 +507,10 @@ namespace frik
         validate("fHmdPivotCalibrationDuration", hmdPivotCalibrationDuration, 4.0f, 30.0f, 10.0f);
         validate("fLegSlackAutoAdjustRate", legSlackAutoAdjustRate, 0.0f, 10.0f, 3.0f);
         validate("fTorsoTwistShare", torsoTwistShare, 0.0f, 0.9f, 0.0f);
+        // 0 disables; below 5 degrees the feet would re-plant almost every frame.
+        if (turnInPlaceStepDegrees != 0.0f) {
+            validate("fTurnInPlaceStepDegrees", turnInPlaceStepDegrees, 5.0f, 90.0f, 0.0f);
+        }
     }
 
     /**
