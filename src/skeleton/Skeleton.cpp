@@ -740,8 +740,11 @@ namespace frik
             reason = "no player";
         } else if (!legNodesAvailable) {
             reason = "leg bones missing";
-        } else if (g_config.isPlayingSeated) {
-            reason = "seated mode";
+            // NOT gated on g_config.isPlayingSeated. That setting selects which
+            // height/posture offsets apply when the player is physically sitting in a
+            // real chair; it says nothing about whether the avatar should have legs.
+            // Upstream 0.77.12 never referenced it in Skeleton.cpp, and gating on it
+            // disabled the legs outright for every seated player.
         } else if (g_frik.isPauseMenuOpen()) {
             reason = "pause menu";
         } else if (isJumpingOrInAir()) {

@@ -244,6 +244,7 @@ int main()
         for (const float handY : { 8.0f, 16.0f, 24.0f }) {
             ArmContinuityState wristState;
             Vec3 previousPole{};
+            float previousWrist = 0.0f;
             bool havePrevious = false;
             for (int step = 0; step <= 720; ++step) {
                 const float roll = static_cast<float>(step) * 0.5f * pi / 180.0f;
@@ -262,7 +263,13 @@ int main()
                 }
                 if (havePrevious) {
                     require(dot(solved.pole, previousPole) > 0.5f, "elbow pole stays continuous as the wrist rolls through +/-180 degrees");
+                    // Assert on the RAW correction too. The pole is smoothed, so it
+                    // hides a jump that still reads as a snap in VR; wristCorrection
+                    // is un-smoothed and is what actually flips sign.
+                    const float jump = std::abs(solved.wristCorrection - previousWrist) * 180.0f / pi;
+                    require(jump < 20.0f, "wrist correction does not flip sign as the roll passes +/-180 degrees");
                 }
+                previousWrist = solved.wristCorrection;
                 previousPole = solved.pole;
                 havePrevious = true;
             }

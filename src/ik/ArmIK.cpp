@@ -14,6 +14,9 @@ namespace
     constexpr float kBehindShoulderCorrectionRange = 0.1f;
     constexpr float kWristDeadZone = 54.0f;
     constexpr float kMaximumWristCorrection = 35.0f;
+    // Where the signed wrist angle becomes too close to a half turn for its sign to
+    // be meaningful; the correction is faded out between here and 180 degrees.
+    constexpr float kWristAmbiguityStart = 130.0f;
     constexpr float kMaximumArmStretch = 0.06f;
     constexpr float kPoleTimeConstant = 0.045f;
     constexpr float kSingularPoleTimeConstant = 0.085f;
@@ -130,7 +133,18 @@ namespace
         // dead zone. Cap the swivel contribution so hand orientation remains
         // a late, soft cue rather than taking control of the elbow.
         const float scale = degreesToRadians(135.0f);
-        const float correction = (std::min)(excess * excess / scale, degreesToRadians(kMaximumWristCorrection));
+        float correction = (std::min)(excess * excess / scale, degreesToRadians(kMaximumWristCorrection));
+
+        // Near +/-180 degrees the rotation direction is ambiguous - both signs move
+        // equally toward the target - and signedAngle comes from atan2, so its sign
+        // flips there on noise. The correction has already saturated by roughly 123
+        // degrees, so that flip swung the elbow by twice the cap in a single frame:
+        // the observed "elbow snaps left to right", logged as wrist alternating
+        // between +35.0 and -35.0 degrees. Fade the magnitude out across the
+        // ambiguous band so it reaches zero exactly where the sign stops meaning
+        // anything, leaving the position model in charge there.
+        const float ambiguity = frik::ik::smoothStep(degreesToRadians(kWristAmbiguityStart), degreesToRadians(180.0f), std::abs(angle));
+        correction *= 1.0f - ambiguity;
         return std::copysign(correction, angle);
     }
 }
