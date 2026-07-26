@@ -84,6 +84,7 @@ namespace frik
         void setupHead(float neckYaw, float neckPitch) const;
         void setBodyUnderHMD(float rootYaw);
         void applyTorsoTwist(const ik::TorsoTwist& twist) const;
+        float groundedFootHeight(const RE::NiPoint3& footPosition, float fallbackZ) const;
         void setBodyPosture(float neckPitch);
         void setKneePos();
         void walk();

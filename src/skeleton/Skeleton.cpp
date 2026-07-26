@@ -16,6 +16,7 @@
 #include "f4vr/F4VRUtils.h"
 #include "ik/ArmIK.h"
 #include "ik/TorsoIK.h"
+#include "world/GroundQuery.h"
 #include "vrcf/VRControllersManager.h"
 
 using namespace common;
@@ -627,6 +628,40 @@ namespace frik
         _leftHandDampingPrimed = false;
     }
 
+    /**
+     * Ground height under a foot, falling back to the body-root plane.
+     *
+     * FRIK forces both feet onto a single plane through the root, so on a slope or
+     * stairs one foot floats while the other sinks. The probe is deliberately short
+     * and the result is clamped near the root plane so a ray that hits something
+     * unexpected (a ledge above, a hole below) cannot pull a leg past its reach -
+     * setSingleLeg would reject that pose and drop the leg entirely.
+     */
+    float Skeleton::groundedFootHeight(const RE::NiPoint3& footPosition, const float fallbackZ) const
+    {
+        if (!g_config.groundAwareFeet || !std::isfinite(fallbackZ) || !isFinite(footPosition)) {
+            return fallbackZ;
+        }
+
+        // Enough to clear a stair rise above and a short drop below, no more.
+        constexpr float probeUp = 45.0f;
+        constexpr float probeDown = 75.0f;
+        constexpr float maximumRise = 35.0f;
+        constexpr float maximumDrop = 55.0f;
+
+        const RE::NiPoint3 probeOrigin(footPosition.x, footPosition.y, fallbackZ);
+        const auto ground = world::findGround(probeOrigin, probeUp, probeDown);
+        if (!ground) {
+            return fallbackZ;
+        }
+
+        const float groundZ = ground->position.z;
+        if (!std::isfinite(groundZ)) {
+            return fallbackZ;
+        }
+        return std::clamp(groundZ, fallbackZ - maximumDrop, fallbackZ + maximumRise);
+    }
+
     void Skeleton::resetWalkingState()
     {
         _prevSpeed = 0.0f;
@@ -1169,8 +1204,8 @@ namespace frik
             // we're standing still so just set foot positions accordingly.
             _leftFootPos = lFoot->world.translate;
             _rightFootPos = rFoot->world.translate;
-            _leftFootPos.z = _root->world.translate.z;
-            _rightFootPos.z = _root->world.translate.z;
+            _leftFootPos.z = groundedFootHeight(_leftFootPos, _root->world.translate.z);
+            _rightFootPos.z = groundedFootHeight(_rightFootPos, _root->world.translate.z);
 
             if (!isFinite(_leftFootPos) || !isFinite(_rightFootPos)) {
                 resetWalkingState();
@@ -1210,8 +1245,8 @@ namespace frik
                 } else {
                     _directionChangeDelayRemaining = kDirectionChangeDelaySeconds;
                 }
-                _rightFootTarget.z = _root->world.translate.z;
-                _rightFootStart.z = _root->world.translate.z;
+                _rightFootTarget.z = groundedFootHeight(_rightFootTarget, _root->world.translate.z);
+                _rightFootStart.z = groundedFootHeight(_rightFootStart, _root->world.translate.z);
                 _rightFootPos = _rightFootStart + (_rightFootTarget - _rightFootStart) * interp;
                 const float stepAmount = std::clamp(MatrixUtils::vec3Len(_rightFootTarget - _rightFootStart) / 150.0f, 0.0f, 1.0f);
                 const float stepHeight = (std::max)(stepAmount * 9.0f, 1.0f);
@@ -1228,8 +1263,8 @@ namespace frik
                 } else {
                     _directionChangeDelayRemaining = kDirectionChangeDelaySeconds;
                 }
-                _leftFootTarget.z = _root->world.translate.z;
-                _leftFootStart.z = _root->world.translate.z;
+                _leftFootTarget.z = groundedFootHeight(_leftFootTarget, _root->world.translate.z);
+                _leftFootStart.z = groundedFootHeight(_leftFootStart, _root->world.translate.z);
                 _leftFootPos = _leftFootStart + (_leftFootTarget - _leftFootStart) * interp;
                 const float stepAmount = std::clamp(MatrixUtils::vec3Len(_leftFootTarget - _leftFootStart) / 150.0f, 0.0f, 1.0f);
                 const float stepHeight = (std::max)(stepAmount * 9.0f, 1.0f);

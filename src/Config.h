@@ -133,6 +133,7 @@ namespace frik
         float hmdPivotCalibrationDuration = 10.0f;
         float legSlackAutoAdjustRate = 3.0f;
         float torsoTwistShare = 0.0f;
+        bool groundAwareFeet = false;
 
         // Head Geometry Hide
         bool hideHead = false;
